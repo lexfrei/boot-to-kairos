@@ -5,6 +5,8 @@ go 1.27
 require (
 	github.com/cockroachdb/errors v1.13.0
 	github.com/google/go-containerregistry v0.21.5
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sys v0.44.0
 )
 
