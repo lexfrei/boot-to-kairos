@@ -73,7 +73,8 @@ func MountsUnder(mountinfo io.Reader, root string) ([]string, error) {
 }
 
 // Setup recursively binds each existing Src at root/Dst, hides the EFI
-// variables under the bound /sys, and adds a read-only, non-recursive bind of
+// variables under the bound /sys and the kernel command line under the
+// bound /proc, and adds a read-only, non-recursive bind of
 // root itself at root/SourceDir.
 func Setup(root string, binds []Bind) error {
 	run := filepath.Join(root, "run")
@@ -101,6 +102,9 @@ func Setup(root string, binds []Bind) error {
 		}
 	}
 	if err := hideEFIVars(root, unix.Mount); err != nil {
+		return err
+	}
+	if err := hideCmdline(root, unix.Mount); err != nil {
 		return err
 	}
 	src := filepath.Join(root, SourceDir)
@@ -183,6 +187,31 @@ func hideEFIVars(root string, mount func(string, string, string, uintptr, string
 		if err := mount("tmpfs", dir, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "mode=0555,size=4k"); err != nil {
 			return errors.Wrapf(err, "hide %s from the build", dir)
 		}
+	}
+	return nil
+}
+
+// hideCmdline covers the bound /proc/cmdline with an empty read-only file.
+// kairos-agent merges install keys from it over the cloud-config, each
+// token evaluated as a jq assignment, and runs the stages it names; on a
+// host that is not Kairos nothing on it is meant for the agent. The file
+// lives on the sandbox's private /run.
+func hideCmdline(root string, mount func(string, string, string, uintptr, string) error) error {
+	target := filepath.Join(root, "proc/cmdline")
+	if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return errors.Wrap(err, "check the kernel command line")
+	}
+	empty := filepath.Join(root, "run/btk-cmdline")
+	if err := os.WriteFile(empty, nil, 0o444); err != nil {
+		return errors.Wrap(err, "create the build's kernel command line")
+	}
+	if err := mount(empty, target, "", unix.MS_BIND, ""); err != nil {
+		return errors.Wrap(err, "hide the kernel command line from the build")
+	}
+	if err := mount("", target, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY, ""); err != nil {
+		return errors.Wrap(err, "make the build's kernel command line read-only")
 	}
 	return nil
 }

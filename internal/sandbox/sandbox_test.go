@@ -295,3 +295,90 @@ func TestSetupHidesEFIVars(t *testing.T) {
 		t.Fatalf("host stand-in for the legacy interface: %v", err)
 	}
 }
+
+// kairos-agent merges install keys from the kernel command line, through a
+// jq assignment per token, and runs stages it names; the build must not see
+// the host's. Nothing on a host that is not Kairos means anything to it.
+func TestHideCmdlineCoversItReadOnly(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"proc", "run"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/cmdline"), []byte("install.device=/dev/vdb\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []mountCall
+	if err := hideCmdline(root, recordMounts(&calls, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || calls[0].target != filepath.Join(root, "proc/cmdline") || calls[0].flags&unix.MS_BIND == 0 ||
+		calls[1].target != calls[0].target || calls[1].flags&unix.MS_RDONLY == 0 || calls[1].flags&unix.MS_REMOUNT == 0 {
+		t.Fatalf("mounts %+v, want a bind over proc/cmdline remounted read-only", calls)
+	}
+	if b, err := os.ReadFile(calls[0].src); err != nil || len(b) != 0 || !strings.HasPrefix(calls[0].src, filepath.Join(root, "run")+"/") {
+		t.Fatalf("bound %s: %q, %v, want an empty file on the sandbox's private run", calls[0].src, b, err)
+	}
+}
+
+func TestHideCmdlineFailsClosed(t *testing.T) {
+	var calls []mountCall
+	for _, failing := range []uintptr{unix.MS_BIND, unix.MS_REMOUNT | unix.MS_BIND | unix.MS_RDONLY} {
+		root := t.TempDir()
+		for _, d := range []string{"proc", "run"} {
+			if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, "proc/cmdline"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mount := func(_, _, _ string, flags uintptr, _ string) error {
+			if flags == failing {
+				return unix.EPERM
+			}
+			return nil
+		}
+		if err := hideCmdline(root, mount); !errors.Is(err, unix.EPERM) {
+			t.Fatalf("mount %#x failing gave %v", failing, err)
+		}
+	}
+	// A path that cannot be checked is not taken as absent.
+	file := t.TempDir()
+	if err := os.WriteFile(filepath.Join(file, "proc"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hideCmdline(file, recordMounts(&calls, nil)); err == nil {
+		t.Fatal("an unreadable cmdline path taken as absent")
+	}
+	empty := t.TempDir()
+	calls = nil
+	if err := hideCmdline(empty, recordMounts(&calls, nil)); err != nil || len(calls) != 0 {
+		t.Fatalf("%v, mounts %+v; nothing to hide without a bound proc", err, calls)
+	}
+}
+
+func TestSetupHidesTheHostCmdline(t *testing.T) {
+	requireRoot(t)
+	root, binds := fixture(t)
+	host := filepath.Join(filepath.Dir(root), "host-proc/cmdline")
+	if err := os.WriteFile(host, []byte("install.device=/dev/vdb\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Setup(root, binds); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "proc/cmdline")); err != nil || len(b) != 0 {
+		t.Fatalf("cmdline in the build: %q, %v", b, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/cmdline"), []byte("x"), 0o600); !errors.Is(err, unix.EROFS) {
+		t.Fatalf("writing the cmdline in the build: %v, want EROFS", err)
+	}
+	if err := Teardown(root); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(host); err != nil || string(b) != "install.device=/dev/vdb\n" {
+		t.Fatalf("host stand-in after teardown: %q, %v", b, err)
+	}
+}
