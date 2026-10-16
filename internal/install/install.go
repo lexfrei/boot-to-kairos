@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"golang.org/x/sys/unix"
 
+	"github.com/lexfrei/boot-to-kairos/internal/efiboot"
 	"github.com/lexfrei/boot-to-kairos/internal/flash"
 	"github.com/lexfrei/boot-to-kairos/internal/image"
 	"github.com/lexfrei/boot-to-kairos/internal/kairos"
@@ -140,6 +141,10 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
+	entry, err := bootEntry(raw, o.Disk)
+	if err != nil {
+		return err
+	}
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -168,8 +173,49 @@ func Run(ctx context.Context, o Options) error {
 	log.Printf("copied %d MiB, zeroed %d MiB, read-back verified after %d repair rounds; flushing the other disks",
 		st.Copied>>20, st.Zeroed>>20, st.Repairs)
 	quiesce.SyncOthers(o.Disk, syncTimeout)
+	if entry != nil {
+		writeBootEntry(entry)
+	}
 	log.Print("rebooting")
 	return errors.Wrap(unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART), "reboot")
+}
+
+const efivars = "/sys/firmware/efi/efivars"
+
+// bootEntry prepares the boot entry while the old disk can still be read.
+// Without efivarfs there is nothing to write it to, and the firmware's
+// fallback is all the new system has.
+func bootEntry(raw, disk string) (*efiboot.Plan, error) {
+	if err := efiboot.Available(efivars); err != nil {
+		log.Printf("warning: %v; no boot entry will be written, the firmware has to fall back to \\EFI\\BOOT on the disk", err)
+		return nil, nil //nolint:nilnil // nothing to write is not an error
+	}
+	sector, err := flash.SectorSize(disk)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := efiboot.NewPlan(raw, sector, runtime.GOARCH)
+	if err != nil {
+		return nil, errors.Wrap(err, "boot entry; nothing was written")
+	}
+	if err := plan.Replacing(disk, sector); err != nil {
+		log.Printf("warning: %v; the old system's boot entries will stay", err)
+	}
+	return plan, nil
+}
+
+// writeBootEntry only logs a failure: the disk is written by now, and the
+// reboot still has the firmware's fallback to \EFI\BOOT.
+func writeBootEntry(plan *efiboot.Plan) {
+	res, err := plan.Apply(efivars)
+	switch {
+	case err == nil:
+		log.Printf("boot entry: %s", res)
+	case !res.Ordered:
+		log.Printf("boot entry: %s; %v. The firmware has to fall back to \\EFI\\BOOT on the disk", res, err)
+	default:
+		log.Printf("boot entry: %s; %v", res, err)
+	}
 }
 
 var writeImage = flash.WriteVerified //nolint:gochecknoglobals // test seam
