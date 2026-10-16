@@ -153,11 +153,7 @@ func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
 	if err := quiesce.Preflight(o.Disk); err != nil {
 		return err
 	}
-	cmdline, err := os.ReadFile("/proc/cmdline")
-	if err != nil {
-		return errors.Wrap(err, "read /proc/cmdline")
-	}
-	names, labels, err := kairos.Targets(cfg, cmdline)
+	names, labels, err := kairos.Targets(cfg)
 	if err != nil {
 		return err
 	}

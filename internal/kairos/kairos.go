@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +19,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/errors"
-	"github.com/google/shlex"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/lexfrei/boot-to-kairos/internal/sandbox"
@@ -34,8 +32,9 @@ const ConfigName = "run/btk-config.yaml"
 // leave a machine nobody can log in to.
 var ErrNotCloudConfig = errors.New("config does not start with #cloud-config")
 
-// ErrUncheckable marks configuration the agent would fetch or merge from
-// elsewhere, which cannot be checked here.
+// ErrUncheckable marks configuration that cannot be checked here: what the
+// agent would fetch or merge from elsewhere, and keys spelled so that it
+// reads them otherwise than written.
 var ErrUncheckable = errors.New("configuration from elsewhere cannot be checked")
 
 type uncheckable struct{ error }
@@ -182,67 +181,133 @@ type partition struct {
 	FS    string `yaml:"fs"`
 }
 
-// Targets returns the partition names and filesystem labels the agent
-// looks up on the host for cfg and the host's kernel command line: the
-// defaults, the ones they rename them to, and the config's extra
-// partitions, except those left unformatted.
-func Targets(cfg, cmdline []byte) (names, labels []string, err error) {
-	var c struct {
-		ConfigURL string `yaml:"config_url"` //nolint:tagliatelle // Kairos's key
-		Install   struct {
-			Partitions map[string]partition `yaml:"partitions"`
-			Extra      []partition          `yaml:"extra-partitions"` //nolint:tagliatelle // Kairos's key
-		} `yaml:"install"`
+// Targets returns the partition names and filesystem labels the agent may
+// look up on the host for cfg: the defaults, those the config gives the
+// agent's own partitions, and those of its extra partitions. kairos-agent
+// v4.3.0 lays its own partitions out from the defaults, keeping only their
+// sizes, but an image may ship an agent that honours them. The agent never
+// reads the host's kernel command line, which the sandbox hides.
+func Targets(cfg []byte) (names, labels []string, err error) {
+	top, install, err := parseConfig(cfg)
+	if err != nil {
+		return nil, nil, err
 	}
-	if err := yaml.Unmarshal(cfg, &c); err != nil {
-		return nil, nil, errors.Wrap(err, "parse cloud-config")
-	}
-	if c.ConfigURL != "" {
+	// The collector fetches config_url spelled exactly so, and only a string.
+	if u, ok := top["config_url"].(string); ok && u != "" {
 		return nil, nil, uncheckable{errors.New("the cloud-config sets config_url, which the agent fetches and merges unchecked; inline that configuration")}
+	}
+	var c struct {
+		Partitions map[string]partition `yaml:"partitions"`
+		Extra      []partition          `yaml:"extra-partitions"` //nolint:tagliatelle // Kairos's key
+	}
+	if err := redecode(install, &c); err != nil {
+		return nil, nil, err
 	}
 	names = slices.Clone(defaultNames)
 	labels = slices.Clone(defaultLabels)
-	parts := slices.Collect(maps.Values(c.Install.Partitions))
-	for _, p := range append(parts, c.Install.Extra...) {
-		switch p.FS {
-		case "-", "none", "noformat":
-			continue
-		}
-		if p.Name != "" {
+	// The agent formats by name only a partition with a filesystem, but
+	// mounts its own partitions by label whatever fs says; extra
+	// partitions are never mounted.
+	add := func(p partition, mounted bool) {
+		if p.Name != "" && !unformatted(p.FS) {
 			names = append(names, p.Name)
 		}
-		if p.Label != "" {
+		if p.Label != "" && (mounted || !unformatted(p.FS)) {
 			labels = append(labels, p.Label)
 		}
 	}
-	// The agent also merges install.* keys from the kernel command line,
-	// dotted paths into the same tree.
-	for _, tok := range cmdlineTokens(string(cmdline)) {
-		key, value, _ := strings.Cut(tok, "=")
-		switch {
-		case fetched[key]:
-			return nil, nil, uncheckable{errors.Newf("the kernel command line sets %s, which the agent fetches and merges unchecked; remove it", key)}
-		case strings.HasPrefix(key, "install.extra-partitions"):
-			return nil, nil, uncheckable{errors.Newf("the kernel command line declares %s, which cannot be checked; remove it", key)}
-		case strings.HasPrefix(key, "install.partitions.") && strings.HasSuffix(key, ".name"):
-			names = append(names, value)
-		case strings.HasPrefix(key, "install.partitions.") && strings.HasSuffix(key, ".label"):
-			labels = append(labels, value)
-		}
+	for _, p := range c.Partitions {
+		add(p, true)
+	}
+	for _, p := range c.Extra {
+		add(p, false)
 	}
 	return names, labels, nil
 }
 
-// fetched are the keys through which the agent pulls in more configuration
-// at run time.
-var fetched = map[string]bool{"config_url": true, "kairos.config": true, "kairos.config_url": true, "cos.setup": true} //nolint:gochecknoglobals // fixed set
+func unformatted(fs string) bool {
+	return fs == "-" || fs == "none" || fs == "noformat"
+}
 
-// cmdlineTokens splits a kernel command line the way the agent does, with
-// shlex and its error ignored, which drops what follows an unbalanced
-// quote.
-func cmdlineTokens(cmdline string) []string {
-	tokens, _ := shlex.Split(cmdline)
-	return tokens
+// parseConfig returns the top level of cfg and its install section, after
+// refusing every spelling the agent would read otherwise than written. It
+// merges an install section of its own, spelled install, and reads the
+// result through viper, which lowercases every key, keeps one of two that
+// differ only in case, whichever map iteration reaches last, and nests a
+// dotted key inside the section. With install spelled so and every key
+// under it lowercase and free of dots, both read the same.
+func parseConfig(cfg []byte) (top, install map[string]any, err error) {
+	var doc any
+	if err := yaml.Unmarshal(cfg, &doc); err != nil {
+		return nil, nil, errors.Wrap(err, "parse cloud-config")
+	}
+	install = map[string]any{}
+	if doc == nil {
+		return map[string]any{}, install, nil
+	}
+	top, ok := stringMap(doc)
+	if !ok {
+		return nil, nil, errors.New("the cloud-config is not a mapping")
+	}
+	for k := range top {
+		lower := strings.ToLower(k)
+		if (lower == "install" && k != "install") || strings.HasPrefix(lower, "install.") {
+			return nil, nil, uncheckable{errors.Newf("the cloud-config sets %s, which the agent reads otherwise than written; spell it install, with the keys under it nested", k)}
+		}
+	}
+	m, ok := stringMap(top["install"])
+	if !ok {
+		return top, install, nil
+	}
+	return top, m, plainKeys(m, "install")
+}
+
+// plainKeys refuses a key in v, under path, that is not lowercase or holds
+// a dot.
+func plainKeys(v any, path string) error {
+	if m, ok := stringMap(v); ok {
+		for k, e := range m {
+			if k != strings.ToLower(k) || strings.Contains(k, ".") {
+				return uncheckable{errors.Newf("the cloud-config sets %s.%s, which the agent reads otherwise than written; keys under install must be lowercase and hold no dot", path, k)}
+			}
+			if err := plainKeys(e, path+"."+k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	list, _ := v.([]any)
+	for i, e := range list {
+		if err := plainKeys(e, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stringMap returns a YAML mapping keyed by strings; one with a key of
+// another type, like 1 or true, decodes keyed by any.
+func stringMap(v any) (map[string]any, bool) {
+	switch m := v.(type) {
+	case map[string]any:
+		return m, true
+	case map[any]any:
+		out := make(map[string]any, len(m))
+		for k, e := range m {
+			out[fmt.Sprint(k)] = e
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// redecode decodes view, a parsed cloud-config section, into out.
+func redecode(view map[string]any, out any) error {
+	b, err := yaml.Marshal(view)
+	if err != nil {
+		return errors.Wrap(err, "re-encode cloud-config")
+	}
+	return errors.Wrap(yaml.Unmarshal(b, out), "parse cloud-config")
 }
 
 // udevEscape spells name the way udev names its by-label and by-partlabel

@@ -128,7 +128,7 @@ install:
     - name: raw
       fs: none
 `)
-	names, labels, err := Targets(cfg, nil)
+	names, labels, err := Targets(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,54 +147,8 @@ install:
 			t.Errorf("labels = %v, missing %s", labels, want)
 		}
 	}
-	if _, _, err := Targets([]byte("#cloud-config\ninstall: ["), nil); err == nil {
+	if _, _, err := Targets([]byte("#cloud-config\ninstall: [")); err == nil {
 		t.Error("a config that is not YAML must not pass as declaring nothing")
-	}
-}
-
-func TestTargetsReadTheKernelCommandLine(t *testing.T) {
-	// The agent merges install.* keys from the host's /proc/cmdline into
-	// its config.
-	cmdline := []byte("BOOT_IMAGE=/vmlinuz root=/dev/sda2 install.partitions.state.name=sys install.partitions.state.label=SYS quiet\n")
-	names, labels, err := Targets([]byte("#cloud-config\n"), cmdline)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(names, "sys") || !slices.Contains(labels, "SYS") {
-		t.Fatalf("names = %v, labels = %v, want sys and SYS from the command line", names, labels)
-	}
-	if _, _, err := Targets([]byte("#cloud-config\n"), []byte("install.extra-partitions=x\n")); !errors.Is(err, ErrUncheckable) {
-		t.Fatal("extra partitions on the command line cannot be read reliably and must be refused")
-	}
-}
-
-func TestTargetsRefuseConfigFetchedElsewhere(t *testing.T) {
-	// kairos-agent fetches and merges these, recursively, and what they
-	// declare is formatted by name like the rest.
-	for name, in := range map[string][2]string{
-		"config_url in the file": {"#cloud-config\nconfig_url: https://example.com/c.yaml\n", ""},
-		"kairos.config_url=":     {"#cloud-config\n", "quiet kairos.config_url=https://example.com/c.yaml"},
-		"kairos.config=":         {"#cloud-config\n", `kairos.config="install: {}"`},
-		"cos.setup=":             {"#cloud-config\n", "cos.setup=https://example.com/c.yaml"},
-		"config_url= on cmdline": {"#cloud-config\n", "config_url=https://example.com/c.yaml"},
-		"after an escaped quote": {"#cloud-config\n", `k="a\"b" config_url=https://example.com/c.yaml`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, _, err := Targets([]byte(in[0]), []byte(in[1])); !errors.Is(err, ErrUncheckable) {
-				t.Fatalf("err = %v, want ErrUncheckable: a configuration fetched or merged from elsewhere cannot be checked and must be refused", err)
-			}
-		})
-	}
-}
-
-func TestTargetsReadQuotedCommandLineValues(t *testing.T) {
-	cmdline := []byte(`quiet install.partitions.state.name="my state" install.partitions.state.label='my label'`)
-	names, labels, err := Targets([]byte("#cloud-config\n"), cmdline)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(names, "my state") || !slices.Contains(labels, "my label") {
-		t.Fatalf("names = %q, labels = %q: a quoted value with spaces is one, in single quotes too as the agent reads them", names, labels)
 	}
 }
 
@@ -211,5 +165,71 @@ func TestLabelClashesMatchUdevLinkNames(t *testing.T) {
 	got := LabelClashes(dir, []string{"my data", "a/b", "../escape"})
 	if want := []string{"my data", "a/b"}; !slices.Equal(got, want) {
 		t.Fatalf("clashes = %q, want %q", got, want)
+	}
+}
+
+// The agent merges an install section of its own, spelled install, and
+// reads the result through viper, which lowercases every key, keeps one of
+// two differing only in case at random, and nests a dotted key inside the
+// section; any spelling that would read otherwise than written is refused.
+func TestTargetsRefuseSpellingsTheAgentReadsOtherwise(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"Install":                   "#cloud-config\nInstall: {partitions: {oem: {name: myoem}}}\n",
+		"INSTALL beside install":    "#cloud-config\ninstall: {device: /dev/sda}\nINSTALL: {reboot: true}\n",
+		"dotted at the top":         "#cloud-config\ninstall.partitions.oem.fs: none\n",
+		"dotted Install at the top": "#cloud-config\nInstall.device: /dev/sda\n",
+		"Device":                    "#cloud-config\ninstall: {Device: /dev/sda}\n",
+		"deep":                      "#cloud-config\ninstall: {partitions: {oem: {Name: myoem}}}\n",
+		"dotted in the section":     "#cloud-config\ninstall: {partitions.oem: {name: myoem}}\n",
+		"in a list entry":           "#cloud-config\ninstall: {extra-partitions: [{name: a, Label: b}]}\n",
+		"dotted in a list entry":    "#cloud-config\ninstall: {extra-partitions: [{name: a, name.x: b}]}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := Targets([]byte(cfg)); !errors.Is(err, ErrUncheckable) {
+				t.Fatalf("err = %v, want ErrUncheckable", err)
+			}
+		})
+	}
+	names, labels, err := Targets([]byte("#cloud-config\n1: x\ninstall:\n  device: /dev/sda\n  partitions: {oem: {name: myoem, label: MY_OEM}}\n  extra-partitions: [{name: data, label: DATA, fs: ext4}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(names, "myoem") || !slices.Contains(names, "data") || !slices.Contains(labels, "MY_OEM") || !slices.Contains(labels, "DATA") {
+		t.Fatalf("names = %v, labels = %v, want myoem, data, MY_OEM, DATA", names, labels)
+	}
+}
+
+// The collector fetches config_url spelled exactly so.
+func TestTargetsReadConfigURLAsTheCollectorDoes(t *testing.T) {
+	if _, _, err := Targets([]byte("#cloud-config\nconfig_url: https://example.com/c.yaml\n")); !errors.Is(err, ErrUncheckable) {
+		t.Errorf("config_url gave %v, want ErrUncheckable", err)
+	}
+	if _, _, err := Targets([]byte("#cloud-config\nConfig_URL: https://example.com/c.yaml\nconfig_url: [x]\n")); err != nil {
+		t.Errorf("a key the collector does not fetch refused: %v", err)
+	}
+}
+
+// Only the install section goes through viper; stages are run as written.
+func TestTargetsLeaveTheRestOfTheConfigAlone(t *testing.T) {
+	cfg := "#cloud-config\nstages:\n  boot:\n    - environment: {HTTP_PROXY: x, http_proxy: x}\nlabels: {app: a, app.kubernetes.io/name: b}\n"
+	if _, _, err := Targets([]byte(cfg)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An agent that honours the config's own partitions formats one by name
+// only when it has a filesystem, but mounts it by label whatever fs says;
+// extra partitions are never mounted.
+func TestTargetsCountMountedLabelsOfUnformattedPartitions(t *testing.T) {
+	cfg := []byte("#cloud-config\ninstall:\n  partitions: {state: {name: hs, label: HOSTROOT, fs: none}}\n  extra-partitions: [{name: xs, label: XS, fs: none}]\n")
+	names, labels, err := Targets(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(labels, "HOSTROOT") || slices.Contains(labels, "XS") {
+		t.Errorf("labels = %v, want HOSTROOT, not XS", labels)
+	}
+	if slices.Contains(names, "hs") || slices.Contains(names, "xs") {
+		t.Errorf("names = %v: an unformatted partition is not looked up by name", names)
 	}
 }

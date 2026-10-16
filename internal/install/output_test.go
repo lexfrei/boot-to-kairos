@@ -217,7 +217,7 @@ func TestARunThatCannotTakeTheLockIsReported(t *testing.T) {
 
 func configURLRefusal(t *testing.T) error {
 	t.Helper()
-	_, _, err := kairos.Targets([]byte("#cloud-config\nconfig_url: https://example.com/c.yaml\n"), nil)
+	_, _, err := kairos.Targets([]byte("#cloud-config\nconfig_url: https://example.com/c.yaml\n"))
 	if err == nil {
 		t.Fatal("config_url was not refused")
 	}

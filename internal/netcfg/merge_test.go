@@ -49,7 +49,7 @@ func inject(t *testing.T, cfg string) yipConfig {
 	if err := kairos.CheckConfig(out); err != nil {
 		t.Fatalf("%v:\n%s", err, out)
 	}
-	if _, _, err := kairos.Targets(out, nil); err != nil {
+	if _, _, err := kairos.Targets(out); err != nil {
 		t.Fatalf("%v:\n%s", err, out)
 	}
 	var c yipConfig
