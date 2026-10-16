@@ -78,3 +78,43 @@ vm kairos@127.0.0.1 'lsblk -o NAME,SIZE,LABEL /dev/vda'
 state=$(vm kairos@127.0.0.1 'kairos-agent state get boot')
 echo "boot state: $state"
 test "$state" = active_boot
+
+# OVMF falls back to \EFI\BOOT\BOOTX64.EFI on its own, so active boot alone
+# would pass without a boot entry. The firmware must have booted the entry
+# boot-to-kairos wrote: "Kairos", on the EFI system partition of the new GPT.
+cat >check-entry.sh <<'EOC'
+set -eu
+v=8be4df61-93ca-11d2-aa0d-00e098032b8c
+hex() { sudo od -An -tx1 -v "$@" | tr -d ' \n'; }
+num() { sudo od -An -tu"$1" -j"$2" -N"$1" "$3" | tr -d ' \n'; }
+cur=$(hex -j4 -N2 /sys/firmware/efi/efivars/BootCurrent-$v)
+n=$(printf '%s%s' "${cur#??}" "${cur%??}" | tr a-f A-F)
+boot=/sys/firmware/efi/efivars/Boot$n-$v
+# After the attributes: the option's attributes and path length, the
+# 14-byte description "Kairos", then the HD() node.
+desc=$(hex -j10 -N14 "$boot")
+node=$(hex -j24 -N4 "$boot")
+part=$(num 4 28 "$boot")
+start=$(num 8 32 "$boot")
+size=$(num 8 40 "$boot")
+sig=$(hex -j48 -N16 "$boot")
+sector=$(cat /sys/block/vda/queue/logical_block_size)
+lba=$(num 8 $((sector + 72)) /dev/vda)
+esize=$(num 4 $((sector + 84)) /dev/vda)
+entry=$((lba * sector + (part - 1) * esize))
+type=$(hex -j$entry -N16 /dev/vda)
+guid=$(hex -j$((entry + 16)) -N16 /dev/vda)
+first=$(num 8 $((entry + 32)) /dev/vda)
+last=$(num 8 $((entry + 40)) /dev/vda)
+echo "BootCurrent Boot$n: description $desc, node $node HD($part,$start,$size,$sig); GPT entry $part: type $type, GUID $guid, sectors $first-$last"
+test "$desc" = 4b006100690072006f0073000000
+test "$node" = 04012a00
+test "$part" -ge 1
+test "$type" = 28732ac11ff8d211ba4b00a0c93ec93b
+test "$sig" = "$guid"
+test "$start" = "$first"
+test "$size" = $((last - first + 1))
+echo "boot entry: booted Boot$n \"Kairos\" on the EFI system partition $guid"
+EOC
+scp -q "${opts[@]}" -P 2222 check-entry.sh kairos@127.0.0.1:check-entry.sh
+vm kairos@127.0.0.1 'sh check-entry.sh'
