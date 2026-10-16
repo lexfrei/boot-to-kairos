@@ -6,6 +6,7 @@ linters:
     - depguard
     - exhaustruct
     - exhaustruct_v5 # the renamed exhaustruct, off for the same reason
+    - gomodguard   # deprecated; gomodguard_v2, enabled by default: all, replaces it
     - gochecknoinits
     - wsl
     - lll
