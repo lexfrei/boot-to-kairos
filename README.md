@@ -9,10 +9,12 @@ This is early work, tested on one setup only (see below). It erases the target d
 1. It pulls the Kairos OCI image and unpacks it into a tmpfs.
 2. It attaches a sparse file the size of the target disk as a loop device and runs the image's own `kairos-agent manual-install` on it, from a chroot of the image. Commands the agent would run against the whole host, `blkdeactivate` and a reboot or poweroff asked for in the config, are replaced with ones that do nothing. You get what that image's installer would give you: active, passive and recovery systems, and a persistent partition over the rest of the disk.
 3. Until this point the running system is not touched, with one exception: the agent runs `udevadm trigger`, which replays device events host-wide, so udev rules on the host run again and may, for example, activate an LVM volume group left inactive. Everything above runs in a mount namespace of its own, so nothing it mounts reaches the rest of the system, and all of it goes away once the installer and whatever it started have exited, however they exit.
-4. It turns off the swap on the target disk, partitions and files alike, and freezes every filesystem on it, so nothing writes to the disk anymore. A filesystem that cannot be frozen, like the vfat ESP, is remounted read-only instead. If any of this fails, or the first write attempt fails before its first byte, what was done is undone and nothing is written.
+4. It turns off the swap on the target disk, partitions and files alike, and freezes every filesystem on it, so nothing writes to the disk anymore. A filesystem that cannot be frozen, like the vfat ESP, is remounted read-only instead. If any of this fails, or the first write attempt fails before its first byte, what was done is undone and nothing is written. If the undo itself fails, it stops with a message that a filesystem may still be frozen and that you should reboot.
 5. It copies the file over the disk. Data is copied and holes are zeroed. Then it reads the disk back, bypassing the page cache, and writes again any page that differs. If that fails, it tries the whole write again, three attempts in all. The machine sits frozen while the whole disk is written and read back, which on a large HDD takes a long time. Do not reset it.
 6. It flushes the filesystems on other disks, each on its own so the old ones on the target disk stay untouched.
 7. It writes a UEFI boot entry for Kairos, puts it in the boot order where the old system stood (see below), and reboots into Kairos.
+
+It reboots through the firmware, not with kexec into the new kernel, on purpose: that first boot proves the firmware boots the disk the same way every later boot will, from the boot entry it wrote or, without one, from its fallback to `\EFI\BOOT`. The price is one POST.
 
 ## UEFI boot entry
 
@@ -65,7 +67,31 @@ sudo ./boot-to-kairos \
   --cloud-config config.yaml
 ```
 
-`--disk` also takes a link like `/dev/disk/by-id/...`. Without `--yes` it asks you to type the disk path before it starts, and for a link that is the kernel name it resolves to, like `/dev/sda`.
+`--disk` also takes a link like `/dev/disk/by-id/...`. Without `--yes` it asks you to type the disk path before it starts, and for a link that is the kernel name it resolves to, like `/dev/sda`. A second instance refuses while one holds `/run/boot-to-kairos.lock`; versions from before this lock was added do not take it.
+
+### Dry run
+
+```bash
+sudo ./boot-to-kairos \
+  --image quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0 \
+  --disk /dev/sda \
+  --cloud-config config.yaml \
+  --dry-run
+```
+
+`--dry-run` does everything up to the point of no return: every check and refusal, the network capture and its refusals (see [Network](#network)), the image pull and the full build of the disk image with the image's `kairos-agent`, and the resolution of what the quiesce would stop. Then it stops, without asking, before turning off swap or freezing anything, and prints the plan to stdout in the order the install worked it out: the image, the network it would carry over (the files it writes and the static addresses and routes they set, or why it carries none), the target disk with its size and sector size, how much of the disk image the build filled, the boot entry it would write (see [UEFI boot entry](#uefi-boot-entry)), the swap areas it would turn off and the filesystems it would freeze or remount read-only. The disk, its swap, its filesystems and the firmware's NVRAM are left alone, apart from what the cloud-config's own install-time stages do (see [Limitations](#limitations)), and what the build mounted goes away with its mount namespace. It exits with 0 when every check before the point of no return passes, and with the refusal otherwise. A passing dry run does not promise a passing real run. Three things it cannot try can still stop the real run: turning off swap, which pulls its pages back into the memory the build filled; a freeze or read-only remount; and a first write attempt that fails before it writes anything. The real run then handles them as step 4 describes. Like the real run, it lets the agent run `udevadm trigger` (see step 3 above).
+
+### Output for automation
+
+With `--output json`, stdout carries a single JSON object and nothing else; logs and the confirmation prompt go to stderr. A dry run prints it at the end. A real run prints it right before the point of no return, or at the refusal if it stops before that; its `passed` covers the checks up to that point, and what happens after it shows only in the exit status and on stderr. Past the point of no return stdout may be a file on the frozen disk, so from there on only stderr and the kernel log (`/dev/kmsg`) get anything.
+
+```json
+{"dryRun":true,"passed":true,"plan":[{"name":"image","value":"quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0"},{"name":"swap to turn off","values":["/swap.img"]}],"refusal":null}
+```
+
+`plan` lists the items in the order the text output does; an item has `value`, or `values` when it is a list. `refusal` is `null` when every check passed, and otherwise has the message and a `class`: `usage`, `not-whole-disk`, `bad-config`, `bios-unsupported`, `label-clash`, `aborted`, `not-enough-memory`, `already-running`, `disk-in-use`, `network-unsupported`, `interrupted`, or `error` for anything else.
+
+Errors before the installer itself starts, flags it cannot parse, not running as root and a failure to set up its mount namespace, print no object. Exit status, in either output mode: 0 when a dry run passed; 1 when it refused, or when a real run refused or failed (a real run that succeeds reboots and never exits); 2 for flags it cannot parse; 128 plus the signal number when the installer was killed by a signal.
 
 ## Network
 
@@ -98,4 +124,4 @@ If the cloud-config configures the network itself, writing files under `/etc/sys
 
 ## CI
 
-Every push and pull request is built, vetted, linted with golangci-lint and the repository's `.golangci.yml`, and tested with `-race`. The tests that need root, which attach loop devices and create device-mapper devices, run through `sudo` on the throwaway GitHub-hosted runner, and the job fails if any test is skipped. An end-to-end job boots a throwaway Ubuntu UEFI VM with an active swap file on the runner's KVM, replaces it with Kairos and passes only if the machine comes back in active boot with the cloud-config's SSH key. Once all of that passes, the same run builds the release binaries and checks that they are static and report their version. On a pushed `v*` tag it then publishes them as a GitHub release, so nothing is published that the run did not test.
+Every push and pull request is built, vetted, linted with golangci-lint and the repository's `.golangci.yml`, and tested with `-race`. The tests that need root, which attach loop devices and create device-mapper devices, run through `sudo` on the throwaway GitHub-hosted runner, and the job fails if any test is skipped. An end-to-end job boots a throwaway Ubuntu UEFI VM with an active swap file on the runner's KVM, first runs a dry run that must pass and leave the start, the end and the partition table of the disk as they were, then replaces it with Kairos and passes only if the machine comes back in active boot with the cloud-config's SSH key. Once all of that passes, the same run builds the release binaries and checks that they are static and report their version. On a pushed `v*` tag it then publishes them as a GitHub release, so nothing is published that the run did not test.

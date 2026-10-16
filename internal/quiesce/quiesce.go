@@ -188,49 +188,10 @@ func DevOf(path string) (string, error) {
 // synchronous, unlike sysrq u. Everything is resolved before the first
 // change, and a failure part way undoes what was done.
 func Disk(disk string) (undo func() error, err error) {
-	if err := Preflight(disk); err != nil {
-		return nil, err
-	}
-	mi, err := os.ReadFile("/proc/self/mountinfo")
-	if err != nil {
-		return nil, errors.Wrap(err, "read mountinfo")
-	}
-	mounts, err := readMounts(bytes.NewReader(mi), "/sys", disk, DevOf)
+	targets, swaps, err := resolve(disk)
 	if err != nil {
 		return nil, err
 	}
-	var files []*os.File
-	ok := false
-	defer func() {
-		if !ok {
-			for _, f := range files {
-				f.Close()
-			}
-		}
-	}()
-	var targets []Mount
-	for _, fs := range filesystems(mounts) {
-		cands := make([]Mount, 0, len(fs))
-		for _, m := range fs {
-			cands = append(cands, Mount{ID: m.id, Point: m.point})
-		}
-		f, m, err := OpenMount(cands)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, f)
-		targets = append(targets, m)
-	}
-	sw, err := os.Open("/proc/swaps")
-	if err != nil {
-		return nil, errors.Wrap(err, "open /proc/swaps")
-	}
-	swaps, err := SwapsToStop(sw, "/sys", disk, DevOf, fileOnDiskBy(mounts))
-	sw.Close()
-	if err != nil {
-		return nil, err
-	}
-
 	var steps []Step
 	for _, s := range offOrder(swaps) {
 		steps = append(steps, Step{Name: "swapoff " + s.Path, Do: func() (func() error, error) {
@@ -238,13 +199,8 @@ func Disk(disk string) (undo func() error, err error) {
 			return func() error { return swapon(s.Path, swapFlags(s.Prio)) }, swapoff(s.Path)
 		}})
 	}
-	for i, m := range targets {
-		f := files[i]
-		var st unix.Statfs_t
-		if err := unix.Fstatfs(int(f.Fd()), &st); err != nil {
-			return nil, errors.Wrapf(err, "statfs %s", m.Point)
-		}
-		flags, bindRO := remountUndo(st.Flags)
+	for _, t := range targets {
+		f, m, flags, bindRO := t.f, t.m, t.flags, t.bindRO
 		// Through the descriptor, the path can no longer lead elsewhere.
 		self := "/proc/self/fd/" + strconv.Itoa(int(f.Fd()))
 		steps = append(steps, Step{Name: "quiesce " + m.Point, Do: func() (func() error, error) {
@@ -265,8 +221,99 @@ func Disk(disk string) (undo func() error, err error) {
 	}
 	// The descriptors stay open: the frozen filesystems are thawed through
 	// them on failure, and the process ends in a reboot otherwise.
-	ok = true
 	return Run(steps)
+}
+
+// Stop is what Disk would stop: the swap areas, in the order it turns them
+// off, and one mount point per filesystem it freezes or remounts read-only.
+type Stop struct {
+	Swaps, Filesystems []string
+}
+
+// Plan resolves what Disk would stop, with the same checks, and changes
+// nothing.
+func Plan(disk string) (Stop, error) {
+	targets, swaps, err := resolve(disk)
+	if err != nil {
+		return Stop{}, err
+	}
+	mounts := make([]Mount, 0, len(targets))
+	for _, t := range targets {
+		t.f.Close()
+		mounts = append(mounts, t.m)
+	}
+	return stopOf(mounts, swaps), nil
+}
+
+func stopOf(mounts []Mount, swaps []Swap) Stop {
+	var st Stop
+	for _, s := range offOrder(swaps) {
+		st.Swaps = append(st.Swaps, s.Path)
+	}
+	for _, m := range mounts {
+		st.Filesystems = append(st.Filesystems, m.Point)
+	}
+	return st
+}
+
+// target is a filesystem on the disk, held open, with the flags a remount
+// back to read-write restores.
+type target struct {
+	f      *os.File
+	m      Mount
+	flags  uintptr
+	bindRO bool
+}
+
+// resolve finds everything Disk stops. Nothing it returns with an error
+// needs closing.
+func resolve(disk string) (targets []target, swaps []Swap, err error) {
+	if err := Preflight(disk); err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if err != nil {
+			for _, t := range targets {
+				t.f.Close()
+			}
+			targets = nil
+		}
+	}()
+	mi, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "read mountinfo")
+	}
+	mounts, err := readMounts(bytes.NewReader(mi), "/sys", disk, DevOf)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, fs := range filesystems(mounts) {
+		cands := make([]Mount, 0, len(fs))
+		for _, m := range fs {
+			cands = append(cands, Mount{ID: m.id, Point: m.point})
+		}
+		f, m, err := OpenMount(cands)
+		if err != nil {
+			return targets, nil, err
+		}
+		targets = append(targets, target{f: f, m: m})
+		var st unix.Statfs_t
+		if err := unix.Fstatfs(int(f.Fd()), &st); err != nil {
+			return targets, nil, errors.Wrapf(err, "statfs %s", m.Point)
+		}
+		t := &targets[len(targets)-1]
+		t.flags, t.bindRO = remountUndo(st.Flags)
+	}
+	sw, err := os.Open("/proc/swaps")
+	if err != nil {
+		return targets, nil, errors.Wrap(err, "open /proc/swaps")
+	}
+	swaps, err = SwapsToStop(sw, "/sys", disk, DevOf, fileOnDiskBy(mounts))
+	sw.Close()
+	if err != nil {
+		return targets, nil, err
+	}
+	return targets, swaps, nil
 }
 
 // mountFlags are the statfs flags that mean the same as the MS_ flags of

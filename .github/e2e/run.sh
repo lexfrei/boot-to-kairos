@@ -63,6 +63,23 @@ EOC
 put cfg.yaml cfg.yaml
 vm ubuntu@127.0.0.1 'sudo fallocate -l 512M /swap.img && sudo chmod 600 /swap.img && sudo mkswap -q /swap.img && sudo swapon /swap.img'
 
+# A dry run must pass and leave the disk as it was: both ends, where the
+# GPT copies are, and the partition table. The reads bypass the page
+# cache, which would otherwise answer from memory.
+# shellcheck disable=SC2016 # expanded on the VM
+disk_state='set -euo pipefail; sudo sync; s=$(sudo blockdev --getsize64 /dev/vda)
+sudo dd if=/dev/vda bs=1M count=64 iflag=direct status=none | sha256sum
+sudo dd if=/dev/vda bs=1M skip=$((s / 1048576 - 64)) count=64 iflag=direct status=none | sha256sum
+sudo sfdisk --dump /dev/vda | sha256sum'
+before=$(vm ubuntu@127.0.0.1 "$disk_state")
+vm ubuntu@127.0.0.1 "sudo ./boot-to-kairos --image $(printf %q "$image") --disk /dev/vda --cloud-config cfg.yaml --dry-run" | tee dry-run.log
+after=$(vm ubuntu@127.0.0.1 "$disk_state")
+if [ "$before" != "$after" ]; then
+	printf 'the dry run changed the disk:\n%s\n---\n%s\n' "$before" "$after" >&2
+	exit 1
+fi
+grep --quiet '^  filesystems to stop: ' dry-run.log
+
 # ssh exits 255 when the reboot drops the connection; any other non-zero
 # status is the installer failing before it got there.
 rc=0

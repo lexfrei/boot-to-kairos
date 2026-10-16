@@ -4,6 +4,7 @@ package kairos
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,11 @@ func TestCommandOutputGoesThroughAPipe(t *testing.T) {
 	}
 	if _, ok := cmd.Stderr.(*os.File); ok {
 		t.Fatal("Stderr is a file: the agent would write to the terminal itself")
+	}
+	// stdout carries only what boot-to-kairos itself prints, a JSON report
+	// among it.
+	if w, ok := cmd.Stdout.(struct{ io.Writer }); !ok || w.Writer != os.Stderr {
+		t.Fatalf("Stdout = %#v, want the agent's output on stderr", cmd.Stdout)
 	}
 }
 
@@ -157,7 +163,7 @@ func TestTargetsReadTheKernelCommandLine(t *testing.T) {
 	if !slices.Contains(names, "sys") || !slices.Contains(labels, "SYS") {
 		t.Fatalf("names = %v, labels = %v, want sys and SYS from the command line", names, labels)
 	}
-	if _, _, err := Targets([]byte("#cloud-config\n"), []byte("install.extra-partitions=x\n")); err == nil {
+	if _, _, err := Targets([]byte("#cloud-config\n"), []byte("install.extra-partitions=x\n")); !errors.Is(err, ErrUncheckable) {
 		t.Fatal("extra partitions on the command line cannot be read reliably and must be refused")
 	}
 }
@@ -174,8 +180,8 @@ func TestTargetsRefuseConfigFetchedElsewhere(t *testing.T) {
 		"after an escaped quote": {"#cloud-config\n", `k="a\"b" config_url=https://example.com/c.yaml`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := Targets([]byte(in[0]), []byte(in[1])); err == nil {
-				t.Fatal("a configuration fetched or merged from elsewhere cannot be checked and must be refused")
+			if _, _, err := Targets([]byte(in[0]), []byte(in[1])); !errors.Is(err, ErrUncheckable) {
+				t.Fatalf("err = %v, want ErrUncheckable: a configuration fetched or merged from elsewhere cannot be checked and must be refused", err)
 			}
 		})
 	}

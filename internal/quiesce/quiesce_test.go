@@ -636,8 +636,9 @@ func TestRunSaysWhichStepItIsWaitingOn(t *testing.T) {
 	t.Cleanup(func() { watchInterval = orig })
 	watchInterval = 20 * time.Millisecond
 	var out bytes.Buffer
+	prevLog := log.Writer()
 	log.SetOutput(&out)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prevLog) })
 
 	// A freeze waits for writers to finish, and one stuck in I/O never
 	// does; past the point of no return nothing else would say so.
@@ -670,8 +671,9 @@ func TestSyncOthersSaysWhenItFlushesNothing(t *testing.T) {
 	t.Cleanup(func() { mountinfoPath = orig })
 	mountinfoPath = filepath.Join(t.TempDir(), "missing")
 	var out bytes.Buffer
+	prevLog := log.Writer()
 	log.SetOutput(&out)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prevLog) })
 	SyncOthers("vda", time.Second)
 	if !strings.Contains(out.String(), "flush") {
 		t.Fatalf("log = %q: when the other disks cannot be flushed, the user must be told", out.String())
@@ -803,5 +805,16 @@ func TestDmTargetsFromWipesTheReply(t *testing.T) {
 		if b != 0 {
 			t.Fatalf("byte %d of the reply is %#x after parsing: a crypt key would stay in memory", i, b)
 		}
+	}
+}
+
+func TestStopOfListsWhatDiskActsOn(t *testing.T) {
+	got := stopOf(
+		[]Mount{{ID: "30", Point: "/"}, {ID: "31", Point: "/boot/efi"}},
+		[]Swap{{Path: "/swap.img", Prio: 5}, {Path: "/dev/vda3", Prio: -2}},
+	)
+	want := Stop{Swaps: []string{"/dev/vda3", "/swap.img"}, Filesystems: []string{"/", "/boot/efi"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stopOf = %+v, want %+v: swaps in the order Disk turns them off", got, want)
 	}
 }

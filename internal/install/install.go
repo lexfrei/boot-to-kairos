@@ -7,6 +7,7 @@ package install
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -39,7 +40,16 @@ type Options struct {
 	Yes        bool
 	// KeepNetwork carries the host's network configuration over.
 	KeepNetwork bool
+	// DryRun stops before the point of no return and prints the plan.
+	DryRun bool
+	// Output is OutputText or OutputJSON; empty means text.
+	Output string
 }
+
+const (
+	OutputText = "text"
+	OutputJSON = "json"
+)
 
 var (
 	ErrMissingImage    = errors.New("--image is required")
@@ -49,12 +59,15 @@ var (
 	ErrBadConfig       = errors.New("--cloud-config is not a cloud-config")
 	ErrBIOSUnsupported = errors.New("legacy BIOS boot is not supported")
 	ErrAborted         = errors.New("aborted by user")
+	ErrBadOutput       = errors.New("--output must be text or json")
+	ErrLabelClash      = errors.New("host partitions carry names kairos-agent uses")
 
 	errNotBlockDevice = errors.New("not a block device")
 )
 
 const (
-	workDir = "/run/boot-to-kairos"
+	workDir  = "/run/boot-to-kairos"
+	lockFile = "/run/boot-to-kairos.lock"
 	// repairRounds bounds how often a page that differs on read-back is
 	// rewritten before giving up.
 	repairRounds = 3
@@ -72,6 +85,8 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 		return nil, ErrMissingDisk
 	case o.ConfigPath == "":
 		return nil, ErrMissingConfig
+	case o.Output != "" && o.Output != OutputText && o.Output != OutputJSON:
+		return nil, errors.Wrapf(ErrBadOutput, "not %q", o.Output)
 	}
 	majmin, err := devOf(o.Disk)
 	if err != nil {
@@ -105,6 +120,32 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 // Run installs the image and reboots into it. Every step before the disk is
 // quiesced leaves the running system as it was when it fails.
 func Run(ctx context.Context, o Options) error {
+	plan := &Plan{}
+	return lockedAndReported(os.Stdout, o, plan, lockFile, workDir, dropWork, func(frozen *bool) error {
+		return run(ctx, o, plan, frozen)
+	})
+}
+
+// lockedAndReported runs run under the lock and reports the outcome, a
+// refusal to take the lock included.
+func lockedAndReported(out io.Writer, o Options, plan *Plan, lock, dir string, drop func(string, bool), run func(frozen *bool) error) error {
+	frozen, err := withWorkLock(lock, dir, drop, run)
+	report(out, o, plan, err, frozen)
+	return err
+}
+
+// dropWork drops the work tmpfs and, unless the disk may be frozen, the
+// directory under it: /run may be a directory on a filesystem of the
+// target disk, and an rmdir on a frozen filesystem waits for a thaw that
+// never comes.
+func dropWork(dir string, frozen bool) {
+	_ = unix.Unmount(dir, unix.MNT_DETACH)
+	if !frozen {
+		_ = os.Remove(dir)
+	}
+}
+
+func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
 	cfg, err := Validate(&o, "/sys", blockDevOf)
 	if err != nil {
 		return err
@@ -122,26 +163,44 @@ func Run(ctx context.Context, o Options) error {
 	}
 	clashes := append(kairos.LabelClashes("/dev/disk/by-partlabel", names), kairos.LabelClashes("/dev/disk/by-label", labels)...)
 	if len(clashes) > 0 {
-		return errors.Newf("host partitions already carry %s, which kairos-agent finds its own partitions by; "+
+		return errors.Wrapf(ErrLabelClash, "host partitions already carry %s, which kairos-agent finds its own partitions by; "+
 			"it would format or mount those instead. Rename them first", strings.Join(clashes, ", "))
 	}
-	if o.KeepNetwork {
-		if cfg, err = netcfg.Carry(cfg, netcfg.Capture, log.Printf); err != nil {
+	plan.Add("image", o.Image)
+	return proceed(ctx, o, cfg, plan, os.Stdin, os.Stdout, frozen)
+}
+
+// proceed asks, builds the image and replaces the disk with it. A dry run
+// does not ask, as it leaves the disk alone, and stops before the point of
+// no return. frozen is set once the disk may be quiesced.
+func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reader, out io.Writer, frozen *bool) error {
+	if !o.KeepNetwork {
+		plan.Add("network", "not carried (--keep-network=false)")
+	} else {
+		var carried netcfg.Carried
+		var err error
+		if cfg, carried, err = netcfg.Carry(cfg, captureNetwork, log.Printf); err != nil {
 			return err
 		}
+		plan.addNetwork(&carried)
 	}
-	if !o.Yes {
-		if err := confirm(ctx, os.Stdin, os.Stdout, o); err != nil {
+	if !o.Yes && !o.DryRun {
+		prompt := out
+		if o.Output == OutputJSON {
+			// stdout carries only the JSON report.
+			prompt = log.Writer()
+		}
+		if err := confirm(ctx, in, prompt, o); err != nil {
 			return err
 		}
 	}
 	warnSecureBoot()
 
-	raw, err := build(ctx, o, cfg)
+	raw, err := buildInterruptible(ctx, o, cfg, plan)
 	if err != nil {
 		return err
 	}
-	entry, err := bootEntry(raw, o.Disk)
+	entry, err := prepareBootEntry(raw, o.Disk, plan)
 	if err != nil {
 		return err
 	}
@@ -149,11 +208,32 @@ func Run(ctx context.Context, o Options) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if o.DryRun {
+		stop, err := planStop(o.Disk)
+		if err != nil {
+			return errors.Wrap(err, "quiesce target disk")
+		}
+		plan.AddList("swap to turn off", stop.Swaps)
+		plan.AddList("filesystems to stop", stop.Filesystems)
+		if err := lockCheck(); err != nil {
+			return err
+		}
+		if o.Output == OutputJSON {
+			return nil
+		}
+		fmt.Fprintf(out, "\nDry run: every check before the point of no return passed, and the disk, its swap, its filesystems and the firmware's NVRAM were left alone, apart from what the cloud-config's own stages did. The real run would go on with this plan:\n")
+		plan.Print(out)
+		return nil
+	}
+	if o.Output == OutputJSON {
+		report(out, o, plan, nil, false)
+	}
+	*frozen = true
 	log.Printf("point of no return: stopping writes to %s", o.Disk)
-	if err := pointOfNoReturn(); err != nil {
+	if err := enterPointOfNoReturn(); err != nil {
 		return err
 	}
-	thaw, err := quiesce.Disk(o.Disk)
+	thaw, err := quiesceDisk(o.Disk)
 	if err != nil {
 		if errors.Is(err, quiesce.ErrUndoIncomplete) {
 			return errors.Wrap(err, "quiesce target disk; nothing was written, but a filesystem may still be frozen: reboot")
@@ -172,12 +252,12 @@ func Run(ctx context.Context, o Options) error {
 	}
 	log.Printf("copied %d MiB, zeroed %d MiB, read-back verified after %d repair rounds; flushing the other disks",
 		st.Copied>>20, st.Zeroed>>20, st.Repairs)
-	quiesce.SyncOthers(o.Disk, syncTimeout)
+	syncOthers(o.Disk, syncTimeout)
 	if entry != nil {
-		writeBootEntry(entry)
+		applyBootEntry(entry)
 	}
 	log.Print("rebooting")
-	return errors.Wrap(unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART), "reboot")
+	return errors.Wrap(reboot(), "reboot")
 }
 
 const efivars = "/sys/firmware/efi/efivars"
@@ -185,9 +265,10 @@ const efivars = "/sys/firmware/efi/efivars"
 // bootEntry prepares the boot entry while the old disk can still be read.
 // Without efivarfs there is nothing to write it to, and the firmware's
 // fallback is all the new system has.
-func bootEntry(raw, disk string) (*efiboot.Plan, error) {
+func bootEntry(raw, disk string, summary *Plan) (*efiboot.Plan, error) {
 	if err := efiboot.Available(efivars); err != nil {
 		log.Printf("warning: %v; no boot entry will be written, the firmware has to fall back to \\EFI\\BOOT on the disk", err)
+		summary.addBootEntry(disk, err, nil)
 		return nil, nil //nolint:nilnil // nothing to write is not an error
 	}
 	sector, err := flash.SectorSize(disk)
@@ -198,9 +279,11 @@ func bootEntry(raw, disk string) (*efiboot.Plan, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "boot entry; nothing was written")
 	}
-	if err := plan.Replacing(disk, sector); err != nil {
+	err = plan.Replacing(disk, sector)
+	if err != nil {
 		log.Printf("warning: %v; the old system's boot entries will stay", err)
 	}
+	summary.addBootEntry(disk, nil, err)
 	return plan, nil
 }
 
@@ -218,7 +301,36 @@ func writeBootEntry(plan *efiboot.Plan) {
 	}
 }
 
-var writeImage = flash.WriteVerified //nolint:gochecknoglobals // test seam
+// buildInterruptible builds the image and marks a failure after a
+// cancellation as one: a cancelled agent fails with its own exit status,
+// not with ctx.Err().
+func buildInterruptible(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, error) {
+	raw, err := buildImage(ctx, o, cfg, plan)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return "", errors.Mark(err, cerr)
+		}
+		return "", err
+	}
+	return raw, nil
+}
+
+// Test seams for every step from the network capture on.
+//
+//nolint:gochecknoglobals // test seams
+var (
+	buildImage           = build
+	enterPointOfNoReturn = pointOfNoReturn
+	quiesceDisk          = quiesce.Disk
+	planStop             = quiesce.Plan
+	captureNetwork       = netcfg.Capture
+	lockCheck            = checkLock
+	writeImage           = flash.WriteVerified
+	syncOthers           = quiesce.SyncOthers
+	reboot               = func() error { return unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART) }
+	prepareBootEntry     = bootEntry
+	applyBootEntry       = writeBootEntry
+)
 
 const writeAttempts = 3
 
@@ -329,6 +441,15 @@ func pointOfNoReturn() error {
 	return errors.Wrap(unix.Mlockall(unix.MCL_CURRENT|unix.MCL_FUTURE), "mlockall; nothing was changed")
 }
 
+// checkLock locks the process in memory as the point of no return does,
+// then lets go.
+func checkLock() error {
+	if err := unix.Mlockall(unix.MCL_CURRENT | unix.MCL_FUTURE); err != nil {
+		return errors.Wrap(err, "mlockall")
+	}
+	return errors.Wrap(unix.Munlockall(), "munlockall")
+}
+
 // dropWorkDir unmounts the work tmpfs lazily, which drops the whole tree,
 // binds included, without deleting anything through them.
 func dropWorkDir() {
@@ -338,7 +459,7 @@ func dropWorkDir() {
 // build installs the image onto a sparse file the size of the disk, in RAM,
 // and returns its path. The work tmpfs stays mounted on success because the
 // file is read from it next.
-func build(ctx context.Context, o Options, cfg []byte) (string, error) {
+func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, error) {
 	size, err := flash.DeviceSize(o.Disk)
 	if err != nil {
 		return "", err
@@ -347,6 +468,7 @@ func build(ctx context.Context, o Options, cfg []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	plan.addDisk(o.Disk, size, sector)
 	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return "", errors.Wrap(err, "create work dir")
 	}
@@ -435,6 +557,12 @@ func build(ctx context.Context, o Options, cfg []byte) (string, error) {
 	if err := unix.Unmount(root, unix.MNT_DETACH); err != nil {
 		return "", errors.Wrap(err, "drop rootfs")
 	}
+	var rst unix.Stat_t
+	if err := unix.Stat(raw, &rst); err != nil {
+		return "", errors.Wrap(err, "stat image file")
+	}
+	// st_blocks counts 512-byte units whatever the block size.
+	plan.addRaw(rst.Blocks*512, size)
 	ok = true
 	return raw, nil
 }
@@ -527,4 +655,175 @@ func (r reopenWriter) Write(p []byte) (int, error) {
 	}
 	defer w.Close()
 	return w.Write(p)
+}
+
+// Plan is what the install has worked out it will do, in the order it
+// worked it out. A dry run prints it, and the JSON report carries it.
+type Plan struct {
+	items []planItem
+}
+
+type planItem struct {
+	name, value string
+	// values is set, possibly empty, for an item that is a list.
+	values []string
+}
+
+func (it planItem) MarshalJSON() ([]byte, error) {
+	if it.values != nil {
+		return json.Marshal(struct {
+			Name   string   `json:"name"`
+			Values []string `json:"values"`
+		}{it.name, it.values})
+	}
+	return json.Marshal(struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}{it.name, it.value})
+}
+
+// Add adds one item.
+func (p *Plan) Add(name, value string) {
+	p.items = append(p.items, planItem{name: name, value: value})
+}
+
+// AddList adds a list of values, or none.
+func (p *Plan) AddList(name string, values []string) {
+	v := strings.Join(values, ", ")
+	if v == "" {
+		v = "none"
+	}
+	p.items = append(p.items, planItem{name: name, value: v, values: append([]string{}, values...)})
+}
+
+func (p *Plan) addDisk(disk string, size int64, sector int) {
+	p.Add("target disk", fmt.Sprintf("%s, %d bytes (%d GiB)", disk, size, size>>30))
+	p.Add("sector size", fmt.Sprintf("%d bytes", sector))
+}
+
+func (p *Plan) addRaw(used, size int64) {
+	p.Add("image.raw", fmt.Sprintf("%d MiB used of %d MiB", used>>20, size>>20))
+}
+
+func (p *Plan) addNetwork(c *netcfg.Carried) {
+	if c.Reason != "" {
+		p.Add("network", "not carried: "+c.Reason)
+		return
+	}
+	p.AddList("network files", c.Files)
+	p.AddList("network addresses", c.Addresses)
+	p.AddList("network routes", c.Routes)
+}
+
+// Print writes one indented line per item, the values aligned.
+func (p *Plan) Print(w io.Writer) {
+	width := 0
+	for _, it := range p.items {
+		width = max(width, len(it.name))
+	}
+	for _, it := range p.items {
+		fmt.Fprintf(w, "  %-*s %s\n", width+1, it.name+":", it.value)
+	}
+}
+
+// ErrAlreadyRunning is returned while another instance holds the lock.
+var ErrAlreadyRunning = errors.New("another boot-to-kairos is running")
+
+// withWorkLock runs run while holding lock, then drops the work dir before
+// letting go, telling drop whether run passed the point of no return: the
+// work dir is shared through the host's /run, and an rmdir of it detaches
+// whatever another instance has mounted on it. A run that reboots never
+// returns, and the lock goes with the process.
+func withWorkLock(lock, dir string, drop func(dir string, frozen bool), run func(frozen *bool) error) (frozen bool, err error) {
+	f, err := os.OpenFile(lock, os.O_RDONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return false, errors.Wrap(err, "open lock file")
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return false, errors.Wrapf(ErrAlreadyRunning, "%s is held", lock)
+		}
+		return false, errors.Wrap(err, "lock")
+	}
+	defer func() { drop(dir, frozen) }()
+	err = run(&frozen)
+	return frozen, err
+}
+
+// addBootEntry says what Apply will be asked to do, given why efivarfs is
+// unusable and why the old disk's entries cannot be told, nil if neither.
+func (p *Plan) addBootEntry(disk string, avail, replace error) {
+	if avail != nil {
+		p.Add("boot entry", fmt.Sprintf("none (%v); the firmware has to fall back to \\EFI\\BOOT on the disk", avail))
+		return
+	}
+	v := fmt.Sprintf("%q for the image's EFI system partition; ", efiboot.Description)
+	if replace != nil {
+		v += fmt.Sprintf("the old system's entries stay: %v", replace)
+	} else {
+		v += fmt.Sprintf("the entries for %s's partitions, if any, are removed", disk)
+	}
+	p.Add("boot entry", v)
+}
+
+// report prints the plan as one JSON object, with the refusal if err is
+// set, unless the output is text or the disk may be frozen: stdout can be
+// a file on it, and a write there would block for good.
+func report(out io.Writer, o Options, plan *Plan, err error, frozen bool) {
+	if o.Output != OutputJSON || frozen {
+		return
+	}
+	type refusal struct {
+		Class   string `json:"class"`
+		Message string `json:"message"`
+	}
+	r := struct {
+		DryRun  bool       `json:"dryRun"`
+		Passed  bool       `json:"passed"`
+		Plan    []planItem `json:"plan"`
+		Refusal *refusal   `json:"refusal"`
+	}{DryRun: o.DryRun, Passed: err == nil, Plan: append([]planItem{}, plan.items...)}
+	if err != nil {
+		r.Refusal = &refusal{Class: errorClass(err), Message: err.Error()}
+	}
+	b, merr := json.Marshal(r)
+	if merr != nil {
+		log.Printf("json report: %v", merr)
+		return
+	}
+	fmt.Fprintf(out, "%s\n", b)
+}
+
+// errorClasses name refusals for automation; the first match wins.
+//
+//nolint:gochecknoglobals // fixed table
+var errorClasses = []struct {
+	err   error
+	class string
+}{
+	{ErrMissingImage, "usage"},
+	{ErrMissingDisk, "usage"},
+	{ErrMissingConfig, "usage"},
+	{ErrBadOutput, "usage"},
+	{ErrNotWholeDisk, "not-whole-disk"},
+	{ErrBadConfig, "bad-config"},
+	{kairos.ErrUncheckable, "bad-config"},
+	{ErrBIOSUnsupported, "bios-unsupported"},
+	{ErrLabelClash, "label-clash"},
+	{ErrAborted, "aborted"},
+	{ErrNotEnoughMemory, "not-enough-memory"},
+	{ErrAlreadyRunning, "already-running"},
+	{quiesce.ErrUnplaceable, "disk-in-use"},
+	{netcfg.ErrUnsupported, "network-unsupported"},
+	{context.Canceled, "interrupted"},
+}
+
+func errorClass(err error) string {
+	for _, c := range errorClasses {
+		if errors.Is(err, c.err) {
+			return c.class
+		}
+	}
+	return "error"
 }

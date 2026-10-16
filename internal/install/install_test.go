@@ -84,6 +84,8 @@ func TestValidate(t *testing.T) {
 		{name: "by-id link", mod: func(o *Options) { o.Disk = "/dev/disk/by-id/virtio-root" }, uefi: true, want: nil},
 		{name: "bad config", mod: func(o *Options) { o.ConfigPath = config(t, "users: []\n") }, uefi: true, want: ErrBadConfig},
 		{name: "bios", mod: func(*Options) {}, uefi: false, want: ErrBIOSUnsupported},
+		{name: "json output", mod: func(o *Options) { o.Output = OutputJSON }, uefi: true, want: nil},
+		{name: "unknown output", mod: func(o *Options) { o.Output = "yaml" }, uefi: true, want: ErrBadOutput},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -175,32 +175,48 @@ const optOut = "; to install without carrying the network over, pass --keep-netw
 // Carry returns cfg with the host's network configuration added to it. cfg
 // comes back as it is when the user's configuration sets up the network
 // itself, or when Kairos's default DHCP covers everything.
-func Carry(cfg []byte, capture func() (*Host, error), logf func(string, ...any)) ([]byte, error) {
+func Carry(cfg []byte, capture func() (*Host, error), logf func(string, ...any)) ([]byte, Carried, error) {
 	why, err := UserConfigures(cfg)
 	if err != nil {
-		return nil, err
+		return nil, Carried{}, err
 	}
 	if why != "" {
-		logf("network: not carried over, as the cloud-config configures it: %s", why)
-		return cfg, nil
+		reason := "the cloud-config configures it: " + why
+		logf("network: not carried over, as %s", reason)
+		return cfg, Carried{Reason: reason}, nil
 	}
 	h, err := capture()
 	if err != nil {
-		return nil, errors.Wrap(err, "read the network configuration"+optOut)
+		return nil, Carried{}, errors.Wrap(err, "read the network configuration"+optOut)
 	}
-	files, notes, err := Plan(h)
+	files, p, err := plan(h)
 	if err != nil {
-		return nil, errors.Wrap(err, "carry the network configuration"+optOut)
+		return nil, Carried{}, errors.Wrap(err, "carry the network configuration"+optOut)
 	}
-	for _, n := range notes {
+	for _, n := range p.notes {
 		logf("network: %s", n)
 	}
 	if len(files) == 0 {
-		logf("network: nothing to carry over; Kairos brings its NICs up with DHCP")
-		return cfg, nil
+		reason := "nothing to carry over; Kairos brings its NICs up with DHCP"
+		logf("network: %s", reason)
+		return cfg, Carried{Reason: reason}, nil
 	}
+	c := Carried{Addresses: p.addrs, Routes: p.routeList}
 	for _, f := range files {
 		logf("network: carrying %s", f.Path)
+		c.Files = append(c.Files, f.Path)
 	}
-	return Inject(cfg, files)
+	out, err := Inject(cfg, files)
+	if err != nil {
+		return nil, Carried{}, err
+	}
+	return out, c, nil
+}
+
+// Carried is what Carry carried over: the files it writes, and the static
+// addresses and routes they set, each prefixed with its interface.
+type Carried struct {
+	// Reason is why nothing was carried, "" when something was.
+	Reason                   string
+	Files, Addresses, Routes []string
 }

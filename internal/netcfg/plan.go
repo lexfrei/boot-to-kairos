@@ -57,11 +57,21 @@ type planner struct {
 	routes          map[int][]Route
 	carried         map[int]bool
 	notes           []string
+	// addrs and routeList say what the rendered files set, for the user.
+	addrs, routeList []string
 }
 
 // Plan turns the host's configuration into the files that recreate it.
 // Notes say what was left out and why.
 func Plan(h *Host) (files []File, notes []string, err error) {
+	files, p, err := plan(h)
+	if err != nil {
+		return nil, nil, err
+	}
+	return files, p.notes, nil
+}
+
+func plan(h *Host) ([]File, *planner, error) {
 	p := &planner{
 		h: h, byIndex: map[int]*Link{}, members: map[int][]int{}, uppers: map[int][]int{},
 		routes: map[int][]Route{}, carried: map[int]bool{},
@@ -91,11 +101,11 @@ func Plan(h *Host) (files []File, notes []string, err error) {
 	if h.ExtraRules > 0 {
 		p.notef("%d policy routing rules are not carried", h.ExtraRules)
 	}
-	files, err = p.render()
+	files, err := p.render()
 	if err != nil {
 		return nil, nil, err
 	}
-	return files, p.notes, nil
+	return files, p, nil
 }
 
 func (p *planner) notef(format string, args ...any) {
@@ -421,10 +431,13 @@ func (p *planner) network(l *Link) (string, error) {
 	for i := range l.Addrs {
 		if a := &l.Addrs[i]; a.Global && !a.Dynamic {
 			extra = append(extra, p.address(l, a))
+			p.addrs = append(p.addrs, l.Name+" "+a.Prefix.String())
 		}
 	}
 	for i := range p.routes[l.Index] {
-		extra = append(extra, routeSection(&p.routes[l.Index][i]))
+		r := &p.routes[l.Index][i]
+		extra = append(extra, routeSection(r))
+		p.routeList = append(p.routeList, routeSummary(l.Name, r))
 	}
 	return sections(append([]string{}, match...), append([]string{"[Link]"}, link...), append([]string{"[Network]"}, network...)) +
 		strings.Join(prefixEach(extra), ""), nil
@@ -502,6 +515,17 @@ func (p *planner) prefixRoute(l *Link, a *Addr) *Route {
 		}
 	}
 	return nil
+}
+
+func routeSummary(link string, r *Route) string {
+	s := link + " " + dst(r)
+	if r.From.IsValid() {
+		s += " from " + r.From.String()
+	}
+	if r.Gw.IsValid() {
+		s += " via " + r.Gw.String()
+	}
+	return s
 }
 
 func routeSection(r *Route) string {
