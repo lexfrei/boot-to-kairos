@@ -30,6 +30,7 @@ func main() {
 	flag.StringVar(&o.ConfigPath, "cloud-config", "", "cloud-config for the installed system; it must give you a way to log in")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask for confirmation")
 	flag.BoolVar(&o.KeepNetwork, "keep-network", true, "carry this system's addresses, routes, DNS, bonds, VLANs and bridges into the installed one, unless the cloud-config configures the network")
+	flag.BoolVar(&o.DryRun, "dry-run", false, "check and build everything, then stop before the point of no return and print the plan; the disk is left alone")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 

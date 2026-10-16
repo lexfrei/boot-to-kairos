@@ -39,6 +39,8 @@ type Options struct {
 	Yes        bool
 	// KeepNetwork carries the host's network configuration over.
 	KeepNetwork bool
+	// DryRun stops before the point of no return and prints the plan.
+	DryRun bool
 }
 
 var (
@@ -125,23 +127,37 @@ func Run(ctx context.Context, o Options) error {
 		return errors.Newf("host partitions already carry %s, which kairos-agent finds its own partitions by; "+
 			"it would format or mount those instead. Rename them first", strings.Join(clashes, ", "))
 	}
-	if o.KeepNetwork {
-		if cfg, _, err = netcfg.Carry(cfg, netcfg.Capture, log.Printf); err != nil {
+	plan := &Plan{}
+	plan.Add("image", o.Image)
+	return proceed(ctx, o, cfg, plan, os.Stdin, os.Stdout)
+}
+
+// proceed asks, builds the image and replaces the disk with it. A dry run
+// does not ask, as it leaves the disk alone, and stops before the point of
+// no return.
+func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reader, out io.Writer) error {
+	if !o.KeepNetwork {
+		plan.Add("network", "not carried (--keep-network=false)")
+	} else {
+		var carried netcfg.Carried
+		var err error
+		if cfg, carried, err = netcfg.Carry(cfg, captureNetwork, log.Printf); err != nil {
 			return err
 		}
+		plan.addNetwork(&carried)
 	}
-	if !o.Yes {
-		if err := confirm(ctx, os.Stdin, os.Stdout, o); err != nil {
+	if !o.Yes && !o.DryRun {
+		if err := confirm(ctx, in, out, o); err != nil {
 			return err
 		}
 	}
 	warnSecureBoot()
 
-	raw, err := build(ctx, o, cfg)
+	raw, err := buildImage(ctx, o, cfg, plan)
 	if err != nil {
 		return err
 	}
-	entry, err := bootEntry(raw, o.Disk)
+	entry, err := prepareBootEntry(raw, o.Disk)
 	if err != nil {
 		return err
 	}
@@ -149,11 +165,25 @@ func Run(ctx context.Context, o Options) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if o.DryRun {
+		stop, err := planStop(o.Disk)
+		if err != nil {
+			return errors.Wrap(err, "quiesce target disk")
+		}
+		plan.AddList("swap to turn off", stop.Swaps)
+		plan.AddList("filesystems to stop", stop.Filesystems)
+		if err := lockCheck(); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "\nDry run: every check before the point of no return passed, and the disk, its swap and its filesystems were left alone. The real run would go on with this plan:\n")
+		plan.Print(out)
+		return nil
+	}
 	log.Printf("point of no return: stopping writes to %s", o.Disk)
-	if err := pointOfNoReturn(); err != nil {
+	if err := enterPointOfNoReturn(); err != nil {
 		return err
 	}
-	thaw, err := quiesce.Disk(o.Disk)
+	thaw, err := quiesceDisk(o.Disk)
 	if err != nil {
 		if errors.Is(err, quiesce.ErrUndoIncomplete) {
 			return errors.Wrap(err, "quiesce target disk; nothing was written, but a filesystem may still be frozen: reboot")
@@ -172,12 +202,12 @@ func Run(ctx context.Context, o Options) error {
 	}
 	log.Printf("copied %d MiB, zeroed %d MiB, read-back verified after %d repair rounds; flushing the other disks",
 		st.Copied>>20, st.Zeroed>>20, st.Repairs)
-	quiesce.SyncOthers(o.Disk, syncTimeout)
+	syncOthers(o.Disk, syncTimeout)
 	if entry != nil {
-		writeBootEntry(entry)
+		applyBootEntry(entry)
 	}
 	log.Print("rebooting")
-	return errors.Wrap(unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART), "reboot")
+	return errors.Wrap(reboot(), "reboot")
 }
 
 const efivars = "/sys/firmware/efi/efivars"
@@ -218,7 +248,22 @@ func writeBootEntry(plan *efiboot.Plan) {
 	}
 }
 
-var writeImage = flash.WriteVerified //nolint:gochecknoglobals // test seam
+// Test seams for every step from the network capture on.
+//
+//nolint:gochecknoglobals // test seams
+var (
+	buildImage           = build
+	enterPointOfNoReturn = pointOfNoReturn
+	quiesceDisk          = quiesce.Disk
+	planStop             = quiesce.Plan
+	captureNetwork       = netcfg.Capture
+	lockCheck            = checkLock
+	writeImage           = flash.WriteVerified
+	syncOthers           = quiesce.SyncOthers
+	reboot               = func() error { return unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART) }
+	prepareBootEntry     = bootEntry
+	applyBootEntry       = writeBootEntry
+)
 
 const writeAttempts = 3
 
@@ -329,6 +374,15 @@ func pointOfNoReturn() error {
 	return errors.Wrap(unix.Mlockall(unix.MCL_CURRENT|unix.MCL_FUTURE), "mlockall; nothing was changed")
 }
 
+// checkLock locks the process in memory as the point of no return does,
+// then lets go.
+func checkLock() error {
+	if err := unix.Mlockall(unix.MCL_CURRENT | unix.MCL_FUTURE); err != nil {
+		return errors.Wrap(err, "mlockall")
+	}
+	return errors.Wrap(unix.Munlockall(), "munlockall")
+}
+
 // dropWorkDir unmounts the work tmpfs lazily, which drops the whole tree,
 // binds included, without deleting anything through them.
 func dropWorkDir() {
@@ -338,7 +392,7 @@ func dropWorkDir() {
 // build installs the image onto a sparse file the size of the disk, in RAM,
 // and returns its path. The work tmpfs stays mounted on success because the
 // file is read from it next.
-func build(ctx context.Context, o Options, cfg []byte) (string, error) {
+func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, error) {
 	size, err := flash.DeviceSize(o.Disk)
 	if err != nil {
 		return "", err
@@ -347,6 +401,7 @@ func build(ctx context.Context, o Options, cfg []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	plan.addDisk(o.Disk, size, sector)
 	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return "", errors.Wrap(err, "create work dir")
 	}
@@ -435,6 +490,12 @@ func build(ctx context.Context, o Options, cfg []byte) (string, error) {
 	if err := unix.Unmount(root, unix.MNT_DETACH); err != nil {
 		return "", errors.Wrap(err, "drop rootfs")
 	}
+	var rst unix.Stat_t
+	if err := unix.Stat(raw, &rst); err != nil {
+		return "", errors.Wrap(err, "stat image file")
+	}
+	// st_blocks counts 512-byte units whatever the block size.
+	plan.addRaw(rst.Blocks*512, size)
 	ok = true
 	return raw, nil
 }
@@ -527,4 +588,56 @@ func (r reopenWriter) Write(p []byte) (int, error) {
 	}
 	defer w.Close()
 	return w.Write(p)
+}
+
+// Plan is what the install has worked out it will do, in the order it
+// worked it out. A dry run prints it.
+type Plan struct {
+	items []planItem
+}
+
+type planItem struct{ name, value string }
+
+// Add adds one item.
+func (p *Plan) Add(name, value string) {
+	p.items = append(p.items, planItem{name, value})
+}
+
+// AddList adds a list of values, or none.
+func (p *Plan) AddList(name string, values []string) {
+	v := strings.Join(values, ", ")
+	if v == "" {
+		v = "none"
+	}
+	p.Add(name, v)
+}
+
+func (p *Plan) addDisk(disk string, size int64, sector int) {
+	p.Add("target disk", fmt.Sprintf("%s, %d bytes (%d GiB)", disk, size, size>>30))
+	p.Add("sector size", fmt.Sprintf("%d bytes", sector))
+}
+
+func (p *Plan) addRaw(used, size int64) {
+	p.Add("image.raw", fmt.Sprintf("%d MiB used of %d MiB", used>>20, size>>20))
+}
+
+func (p *Plan) addNetwork(c *netcfg.Carried) {
+	if c.Reason != "" {
+		p.Add("network", "not carried: "+c.Reason)
+		return
+	}
+	p.AddList("network files", c.Files)
+	p.AddList("network addresses", c.Addresses)
+	p.AddList("network routes", c.Routes)
+}
+
+// Print writes one indented line per item, the values aligned.
+func (p *Plan) Print(w io.Writer) {
+	width := 0
+	for _, it := range p.items {
+		width = max(width, len(it.name))
+	}
+	for _, it := range p.items {
+		fmt.Fprintf(w, "  %-*s %s\n", width+1, it.name+":", it.value)
+	}
 }
