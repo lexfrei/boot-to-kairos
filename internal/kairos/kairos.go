@@ -56,8 +56,9 @@ func Command(ctx context.Context, root, device string) *exec.Cmd {
 	}
 	// Not the files themselves: in its own process group the agent would be
 	// stopped writing to a terminal that has tostop set. A plain writer
-	// makes exec copy the output through a pipe.
-	cmd.Stdout = struct{ io.Writer }{os.Stdout}
+	// makes exec copy the output through a pipe. Its stdout goes to stderr
+	// too, as stdout may carry a JSON report.
+	cmd.Stdout = struct{ io.Writer }{os.Stderr}
 	cmd.Stderr = struct{ io.Writer }{os.Stderr}
 	return cmd
 }

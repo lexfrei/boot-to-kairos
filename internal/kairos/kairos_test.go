@@ -4,6 +4,7 @@ package kairos
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,11 @@ func TestCommandOutputGoesThroughAPipe(t *testing.T) {
 	}
 	if _, ok := cmd.Stderr.(*os.File); ok {
 		t.Fatal("Stderr is a file: the agent would write to the terminal itself")
+	}
+	// stdout carries only what boot-to-kairos itself prints, a JSON report
+	// among it.
+	if w, ok := cmd.Stdout.(struct{ io.Writer }); !ok || w.Writer != os.Stderr {
+		t.Fatalf("Stdout = %#v, want the agent's output on stderr", cmd.Stdout)
 	}
 }
 
