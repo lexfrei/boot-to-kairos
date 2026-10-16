@@ -34,6 +34,14 @@ const ConfigName = "run/btk-config.yaml"
 // leave a machine nobody can log in to.
 var ErrNotCloudConfig = errors.New("config does not start with #cloud-config")
 
+// ErrUncheckable marks configuration the agent would fetch or merge from
+// elsewhere, which cannot be checked here.
+var ErrUncheckable = errors.New("configuration from elsewhere cannot be checked")
+
+type uncheckable struct{ error }
+
+func (uncheckable) Is(target error) bool { return target == ErrUncheckable }
+
 // Command returns kairos-agent manual-install for device, run from the image
 // chrooted at root. The absolute path is resolved after the chroot, so it is
 // the image's agent, never one from the host.
@@ -190,7 +198,7 @@ func Targets(cfg, cmdline []byte) (names, labels []string, err error) {
 		return nil, nil, errors.Wrap(err, "parse cloud-config")
 	}
 	if c.ConfigURL != "" {
-		return nil, nil, errors.New("the cloud-config sets config_url, which the agent fetches and merges unchecked; inline that configuration")
+		return nil, nil, uncheckable{errors.New("the cloud-config sets config_url, which the agent fetches and merges unchecked; inline that configuration")}
 	}
 	names = slices.Clone(defaultNames)
 	labels = slices.Clone(defaultLabels)
@@ -213,9 +221,9 @@ func Targets(cfg, cmdline []byte) (names, labels []string, err error) {
 		key, value, _ := strings.Cut(tok, "=")
 		switch {
 		case fetched[key]:
-			return nil, nil, errors.Newf("the kernel command line sets %s, which the agent fetches and merges unchecked; remove it", key)
+			return nil, nil, uncheckable{errors.Newf("the kernel command line sets %s, which the agent fetches and merges unchecked; remove it", key)}
 		case strings.HasPrefix(key, "install.extra-partitions"):
-			return nil, nil, errors.Newf("the kernel command line declares %s, which cannot be checked; remove it", key)
+			return nil, nil, uncheckable{errors.Newf("the kernel command line declares %s, which cannot be checked; remove it", key)}
 		case strings.HasPrefix(key, "install.partitions.") && strings.HasSuffix(key, ".name"):
 			names = append(names, value)
 		case strings.HasPrefix(key, "install.partitions.") && strings.HasSuffix(key, ".label"):
