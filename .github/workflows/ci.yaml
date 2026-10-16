@@ -1,5 +1,9 @@
 name: CI
 
+# Every push also builds the release binaries, after the tests pass, so a
+# broken release build shows up before tagging; only a v* tag publishes
+# them, and never without the tests of that same run.
+
 on:
   push:
   pull_request:
@@ -63,3 +67,58 @@ jobs:
   e2e:
     uses: ./.github/workflows/e2e.yaml
 
+  build:
+    needs: [lint, test, test-root, e2e]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION" \
+              -o "dist/boot-to-kairos-linux-$arch" ./cmd/boot-to-kairos
+          done
+      - name: Check the binaries
+        run: |
+          out=$(dist/boot-to-kairos-linux-amd64 --version)
+          test "$out" = "boot-to-kairos $VERSION"
+          for arch in amd64 arm64; do
+            bin=dist/boot-to-kairos-linux-$arch
+            kind=$(file "$bin")
+            grep --quiet 'statically linked' <<<"$kind"
+            info=$(go version -m "$bin")
+            grep --quiet --fixed-strings --line-regexp $'\tbuild\t-trimpath=true' <<<"$info"
+            grep --quiet --fixed-strings --line-regexp $'\tbuild\tGOARCH='"$arch" <<<"$info"
+          done
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum boot-to-kairos-linux-* | tee SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes dist/*
