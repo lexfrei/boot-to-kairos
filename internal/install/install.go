@@ -556,12 +556,7 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	if err := unix.Mount("tmpfs", root, "tmpfs", 0, fmt.Sprintf("mode=0755,size=%d", budget)); err != nil {
 		return "", errors.Wrap(err, "mount rootfs tmpfs")
 	}
-	log.Printf("pulling %s", o.Image)
-	img, err := image.Pull(ctx, o.Image, "linux/"+runtime.GOARCH)
-	if err != nil {
-		return "", err
-	}
-	if err := img.Extract(root); err != nil {
+	if err := unpack(ctx, o.Image, root, budget, plan); err != nil {
 		return "", err
 	}
 	var st unix.Statfs_t
@@ -621,6 +616,39 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	plan.addRaw(rst.Blocks*512, size)
 	ok = true
 	return raw, nil
+}
+
+// unpack fetches the image into root, staging each layer on the work
+// tmpfs, outside the image's root.
+func unpack(ctx context.Context, ref, root string, budget uint64, plan *Plan) error {
+	log.Printf("fetching %s", ref)
+	img, err := image.Open(ctx, ref, "linux/"+runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	// Read-only, so a failing close loses nothing.
+	defer func() { _ = img.Close() }()
+	sizes := make([]int64, len(img.Layers))
+	for n := range img.Layers {
+		sizes[n] = img.Layers[n].Size
+	}
+	plan.addImage(img.Transport(), img.Digest.String(), sizes)
+	if err := layersFit(budget, sizes); err != nil {
+		return err
+	}
+	log.Printf("resolved to %s", img.Digest)
+	stage := filepath.Join(workDir, "blobs")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		return errors.Wrap(err, "create staging dir")
+	}
+	err = img.Extract(ctx, root, stage, func(size int64) error {
+		var st unix.Statfs_t
+		if err := unix.Statfs(root, &st); err != nil {
+			return errors.Wrap(err, "statfs rootfs")
+		}
+		return capRootfs(root, budget, (st.Blocks-st.Bfree)*uint64(st.Bsize), size)
+	})
+	return outOfRoom(err)
 }
 
 func install(ctx context.Context, root, device string, cfg []byte) error {
@@ -701,6 +729,61 @@ func splitBudget(budget, rootfsUsed uint64) (rootfs, work uint64, err error) {
 	return rootfs, budget - rootfs, nil
 }
 
+// blobFits refuses to stage a layer of blob bytes as stored when it would
+// not fit beside the rootfsUsed bytes already unpacked and the headroom.
+func blobFits(budget, rootfsUsed uint64, blob int64) error {
+	// Subtracted rather than summed, so that no size can wrap around; a
+	// negative blob converts to more than any budget.
+	if rootfsUsed > budget || uint64(blob) > budget-rootfsUsed || rootfsHeadroom > budget-rootfsUsed-uint64(blob) {
+		return errors.Wrapf(ErrNotEnoughMemory, "a %d MiB layer staged beside %d MiB unpacked does not fit in %d MiB",
+			blob>>20, rootfsUsed>>20, budget>>20)
+	}
+	return nil
+}
+
+// outOfRoom marks a layer that filled the rootfs tmpfs capped by capRootfs
+// as what it is: not enough memory, not a full disk.
+func outOfRoom(err error) error {
+	if !errors.Is(err, unix.ENOSPC) {
+		return err
+	}
+	return fmt.Errorf("%w: the unpacked image outgrew what its staged layer left: %w", ErrNotEnoughMemory, err)
+}
+
+var remount = unix.Mount //nolint:gochecknoglobals // test seam
+
+// capRootfs makes room for a staged layer of blob bytes on the work tmpfs by
+// shrinking the rootfs tmpfs to what is left of budget. Both are mounted
+// with the whole budget, so the layer unpacked beside its staged copy would
+// otherwise overshoot it: past the cap the unpacking fails with ENOSPC
+// rather than the system with OOM.
+func capRootfs(root string, budget, rootfsUsed uint64, blob int64) error {
+	if err := blobFits(budget, rootfsUsed, blob); err != nil {
+		return err
+	}
+	return errors.Wrap(remount("", root, "", unix.MS_REMOUNT, fmt.Sprintf("size=%d", budget-uint64(blob))), "cap rootfs tmpfs")
+}
+
+// layersFit refuses an image before anything is fetched when the install
+// would refuse it or run out of memory later even if no layer unpacked to
+// more than its stored size and none replaced or deleted what an earlier
+// one unpacked: each layer must pass blobFits, and then unpack within the
+// cap capRootfs leaves beside its staged copy.
+func layersFit(budget uint64, sizes []int64) error {
+	var unpacked uint64
+	for n, size := range sizes {
+		if err := blobFits(budget, unpacked, size); err != nil {
+			return errors.Wrapf(err, "layer %d", n)
+		}
+		unpacked += uint64(size)
+		if unpacked > budget-uint64(size) {
+			return errors.Wrapf(ErrNotEnoughMemory, "layer %d: %d MiB unpacked beside its %d MiB staged copy exceeds %d MiB",
+				n, unpacked>>20, size>>20, budget>>20)
+		}
+	}
+	return nil
+}
+
 // reopenWriter writes through a writer it opens for each write.
 type reopenWriter func() (io.WriteCloser, error)
 
@@ -755,6 +838,16 @@ func (p *Plan) AddList(name string, values []string) {
 func (p *Plan) addDisk(disk string, size int64, sector int) {
 	p.Add("target disk", fmt.Sprintf("%s, %d bytes (%d GiB)", disk, size, size>>30))
 	p.Add("sector size", fmt.Sprintf("%d bytes", sector))
+}
+
+func (p *Plan) addImage(source, manifest string, sizes []int64) {
+	var total int64
+	for _, size := range sizes {
+		total += size
+	}
+	p.Add("image source", source)
+	p.Add("image manifest", manifest)
+	p.Add("image layers", fmt.Sprintf("%d, %d MiB as stored", len(sizes), total>>20))
 }
 
 func (p *Plan) addRaw(used, size int64) {

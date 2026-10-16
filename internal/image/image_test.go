@@ -3,15 +3,14 @@ package image
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"golang.org/x/sys/unix"
 )
 
@@ -47,18 +46,18 @@ func layer(t *testing.T, entries ...entry) []byte {
 
 func testImage(t *testing.T, layers ...[]byte) *Image {
 	t.Helper()
-	img := empty.Image
-	for _, l := range layers {
-		b := l
-		ly, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil })
-		if err != nil {
-			t.Fatal(err)
-		}
-		if img, err = mutate.AppendLayers(img, ly); err != nil {
-			t.Fatal(err)
-		}
+	dir := t.TempDir()
+	writeLayout(t, dir, platformImage(t, runtime.GOARCH, layers...))
+	img, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return &Image{img: img, ref: "test"}
+	return img
+}
+
+func extract(t *testing.T, img *Image, dest string) error {
+	t.Helper()
+	return img.Extract(t.Context(), dest, t.TempDir(), func(int64) error { return nil })
 }
 
 func TestExtractAppliesWhiteouts(t *testing.T) {
@@ -73,7 +72,7 @@ func TestExtractAppliesWhiteouts(t *testing.T) {
 		layer(t, entry{name: "etc/.wh.old.conf", typ: tar.TypeReg}),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dest, "usr/bin/kairos-agent"))
@@ -125,7 +124,7 @@ func TestExtractStaysInsideDestination(t *testing.T) {
 		entry{name: "bin", typ: tar.TypeSymlink, link: "usr/bin"},
 		entry{name: "abs", typ: tar.TypeSymlink, link: "/etc/passwd"},
 	))
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(parent, "escape")); !os.IsNotExist(err) {
@@ -171,7 +170,7 @@ func TestExtractLinksToAFileFromALowerLayer(t *testing.T) {
 		layer(t, entry{name: "usr/bin/gunzip", typ: tar.TypeLink, link: "usr/bin/gzip"}),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	a, err := os.Stat(filepath.Join(dest, "usr/bin/gzip"))
@@ -231,7 +230,7 @@ func TestExtractAppliesOpaqueWhiteouts(t *testing.T) {
 		),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "etc/old.d/stale.conf")); !os.IsNotExist(err) {
@@ -263,7 +262,7 @@ func TestExtractKeepsALinkToAReplacedFile(t *testing.T) {
 		),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{"a": "new", "b": "old", "d": "old c"} {
@@ -282,7 +281,7 @@ func TestExtractReplacesADirectoryWithAFile(t *testing.T) {
 		layer(t, entry{name: "x", typ: tar.TypeReg, body: "file"}),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(dest, "x")); err != nil || string(got) != "file" {
@@ -340,7 +339,7 @@ func TestOpaqueWhiteoutReachesLowerDescendants(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			dest := t.TempDir()
-			if err := testImage(t, lower, upper).Extract(dest); err != nil {
+			if err := extract(t, testImage(t, lower, upper), dest); err != nil {
 				t.Fatal(err)
 			}
 			if b, err := os.ReadFile(filepath.Join(dest, "etc/sub/new.conf")); err != nil || string(b) != "new" {
@@ -365,7 +364,7 @@ func TestWhiteoutsOfDotNamesAreIgnored(t *testing.T) {
 		),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "etc/keep")); err != nil {
@@ -390,7 +389,7 @@ func TestWhiteoutHidesOnlyLowerLayers(t *testing.T) {
 		),
 	)
 	dest := t.TempDir()
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"foo", "d/new"} {
@@ -424,7 +423,7 @@ func TestExtractResolvesSymlinksInsideTheImage(t *testing.T) {
 			entry{name: "opt/tools/other", typ: tar.TypeReg, body: "o"},
 		),
 	)
-	if err := img.Extract(dest); err != nil {
+	if err := extract(t, img, dest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "usr/bin/tool")); err != nil {
@@ -443,15 +442,13 @@ func TestExtractResolvesSymlinksInsideTheImage(t *testing.T) {
 
 type failAtEOF struct{}
 
-func (failAtEOF) Read([]byte) (int, error) { return 0, errDigest }
-
-var errDigest = errors.New("digest mismatch")
+func (failAtEOF) Read([]byte) (int, error) { return 0, gzip.ErrChecksum }
 
 func TestExtractReadsEachLayerToTheEnd(t *testing.T) {
-	// The registry client checks a layer's digest only once its stream is
-	// read to EOF, past the tar end marker.
+	// A decompressor reports a bad checksum only at the end of its stream,
+	// past the tar end marker.
 	stream := io.MultiReader(bytes.NewReader(layer(t, entry{name: "f", typ: tar.TypeReg, body: "x"})), failAtEOF{})
-	if err := extractTar(t.TempDir(), stream); !errors.Is(err, errDigest) {
-		t.Fatalf("err = %v, want the digest failure that comes after the tar end marker", err)
+	if err := extractTar(t.TempDir(), stream); !errors.Is(err, gzip.ErrChecksum) {
+		t.Fatalf("err = %v, want the checksum failure that comes after the tar end marker", err)
 	}
 }
