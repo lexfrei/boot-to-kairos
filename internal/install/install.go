@@ -173,7 +173,7 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 	if err != nil {
 		return err
 	}
-	entry, err := prepareBootEntry(raw, o.Disk)
+	entry, err := prepareBootEntry(raw, o.Disk, plan)
 	if err != nil {
 		return err
 	}
@@ -191,7 +191,7 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		if err := lockCheck(); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "\nDry run: every check before the point of no return passed, and the disk, its swap and its filesystems were left alone. The real run would go on with this plan:\n")
+		fmt.Fprintf(out, "\nDry run: every check before the point of no return passed, and the disk, its swap, its filesystems and the firmware's NVRAM were left alone, apart from what the cloud-config's own stages did. The real run would go on with this plan:\n")
 		plan.Print(out)
 		return nil
 	}
@@ -232,9 +232,10 @@ const efivars = "/sys/firmware/efi/efivars"
 // bootEntry prepares the boot entry while the old disk can still be read.
 // Without efivarfs there is nothing to write it to, and the firmware's
 // fallback is all the new system has.
-func bootEntry(raw, disk string) (*efiboot.Plan, error) {
+func bootEntry(raw, disk string, summary *Plan) (*efiboot.Plan, error) {
 	if err := efiboot.Available(efivars); err != nil {
 		log.Printf("warning: %v; no boot entry will be written, the firmware has to fall back to \\EFI\\BOOT on the disk", err)
+		summary.addBootEntry(disk, err, nil)
 		return nil, nil //nolint:nilnil // nothing to write is not an error
 	}
 	sector, err := flash.SectorSize(disk)
@@ -245,9 +246,11 @@ func bootEntry(raw, disk string) (*efiboot.Plan, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "boot entry; nothing was written")
 	}
-	if err := plan.Replacing(disk, sector); err != nil {
+	err = plan.Replacing(disk, sector)
+	if err != nil {
 		log.Printf("warning: %v; the old system's boot entries will stay", err)
 	}
+	summary.addBootEntry(disk, nil, err)
 	return plan, nil
 }
 
@@ -682,4 +685,20 @@ func withWorkLock(lock, dir string, drop func(dir string, frozen bool), run func
 	frozen := false
 	defer func() { drop(dir, frozen) }()
 	return run(&frozen)
+}
+
+// addBootEntry says what Apply will be asked to do, given why efivarfs is
+// unusable and why the old disk's entries cannot be told, nil if neither.
+func (p *Plan) addBootEntry(disk string, avail, replace error) {
+	if avail != nil {
+		p.Add("boot entry", fmt.Sprintf("none (%v); the firmware has to fall back to \\EFI\\BOOT on the disk", avail))
+		return
+	}
+	v := fmt.Sprintf("%q for the image's EFI system partition; ", efiboot.Description)
+	if replace != nil {
+		v += fmt.Sprintf("the old system's entries stay: %v", replace)
+	} else {
+		v += fmt.Sprintf("the entries for %s's partitions, if any, are removed", disk)
+	}
+	p.Add("boot entry", v)
 }

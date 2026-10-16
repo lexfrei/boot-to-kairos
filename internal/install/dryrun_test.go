@@ -47,8 +47,9 @@ func stubMachine(t *testing.T) *[]string {
 		plan.Add("image.raw", "42 MiB used")
 		return "/run/boot-to-kairos/image.raw", nil
 	}
-	prepareBootEntry = func(string, string) (*efiboot.Plan, error) {
+	prepareBootEntry = func(_, disk string, plan *Plan) (*efiboot.Plan, error) {
 		calls = append(calls, "prepare boot entry")
+		plan.addBootEntry(disk, nil, nil)
 		return &efiboot.Plan{}, nil
 	}
 	applyBootEntry = func(*efiboot.Plan) { calls = append(calls, "write boot entry") }
@@ -100,6 +101,7 @@ func TestDryRunStopsBeforeThePointOfNoReturn(t *testing.T) {
 	for _, re := range []string{
 		`(?m)^  image: +quay.io/kairos/hadron:example$`,
 		`(?m)^  image.raw: +42 MiB used$`,
+		`(?m)^  boot entry: +"Kairos" for the image's EFI system partition; the entries for /dev/vda's partitions, if any, are removed$`,
 		`(?m)^  swap to turn off: +/swap.img$`,
 		`(?m)^  filesystems to stop: +/, /boot/efi$`,
 	} {
@@ -285,5 +287,26 @@ func TestRealRunCarriesTheNetworkBeforeItAsks(t *testing.T) {
 	err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader("/dev/vda\n"), &out, new(bool))
 	if !errors.Is(err, unix.EPERM) || len(*calls) != 0 || strings.Contains(out.String(), "Type the disk path") {
 		t.Fatalf("proceed = %v after %v, prompt %q: a network refusal must stop the real run before it asks", err, *calls, out.String())
+	}
+}
+
+func TestPlanDescribesTheBootEntry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		avail, replace error
+		want           string
+	}{
+		"written":             {nil, nil, `"Kairos" for the image's EFI system partition; the entries for /dev/vda's partitions, if any, are removed`},
+		"old disk unreadable": {nil, unix.EIO, `"Kairos" for the image's EFI system partition; the old system's entries stay: input/output error`},
+		"no efivarfs":         {unix.ENOENT, nil, `none (no such file or directory); the firmware has to fall back to \EFI\BOOT on the disk`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			p := &Plan{}
+			p.addBootEntry("/dev/vda", tc.avail, tc.replace)
+			p.Print(&out)
+			if want := "  boot entry: " + tc.want + "\n"; out.String() != want {
+				t.Fatalf("summary = %q, want %q", out.String(), want)
+			}
+		})
 	}
 }
