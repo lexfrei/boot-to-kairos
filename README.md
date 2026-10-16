@@ -56,9 +56,26 @@ sudo ./boot-to-kairos \
 
 `--disk` also takes a link like `/dev/disk/by-id/...`. Without `--yes` it asks you to type the disk path before it starts, and for a link that is the kernel name it resolves to, like `/dev/sda`.
 
+## Network
+
+Kairos brings every Ethernet NIC up with DHCP by default. A machine reachable only at a static address, or only through a bond, a VLAN or a bridge, would not come back on the network after the reboot, so boot-to-kairos carries the running system's network configuration over, unless you pass `--keep-network=false`.
+
+It reads the configuration from the kernel, not from the old system's configuration files: addresses, routes, MTUs, bonds, VLANs and bridges, and the nameservers and search domains from `/etc/resolv.conf` (or, behind systemd-resolved's local stub, from the upstream list resolved keeps in `/run/systemd/resolve/resolv.conf`). It adds a stage to the cloud-config that writes systemd-networkd files on every boot, as Kairos writes its own default configuration, so the configuration survives upgrades. NICs are found by their burnt-in MAC address, so it does not matter that Kairos names them differently.
+
+- An address without a lifetime is written as static, unless a DHCP client owns it. An address with a lifetime came from DHCP or SLAAC. So did an IPv4 address that a lease records: networkd's lease in `/run/systemd/netif/leases`, or, while a DHCP client is running, an unexpired NetworkManager, dhclient or dhcpcd lease under `/var/lib` for that very address. A lease file left from before the address was made static therefore does not count once its client is gone. A dhclient, dhcpcd or udhcpc running for a NIC with no lease to read owns all of the NIC's IPv4 addresses. A NIC with a lease keeps DHCP for IPv4, and router advertisements still configure IPv6. A client started without naming the NIC and without a lease file is not detected, and its addresses are written as static.
+- Routes the system's network configuration set up (`proto boot` and `proto static`) in the main table are carried, source-specific ones with their source. On the carried interfaces, routes from a routing daemon, routes in other tables and routes of types other than unicast are not, and the installer names them; policy routing rules are not carried either. A default route from a routing daemon refuses the install, as without the daemon the installed system would be reachable from its own subnets only: configure such a host's network in the cloud-config. A prefix route that NetworkManager installs beside its addresses comes back with its metric. A `proto boot` route through the gateway of a DHCP lease, which dhclient-script and udhcpc install that way, is left to DHCP; where a DHCP client runs for an interface with no lease to read, so is every `proto boot` IPv4 route through a gateway on it, hand-added ones included, as the two look the same.
+- A NIC that only uses DHCP, at the default MTU, outside any bond, VLAN or bridge, is left to Kairos's default configuration.
+- Bonds, VLANs and bridges are recreated with their MAC addresses and with every parameter that differs from the kernel's default. A parameter systemd-networkd cannot set refuses the install, with its name, rather than being dropped.
+- Interfaces with no NIC under them, such as container bridges, VPN tunnels or a bridge's tap ports, are left out.
+- Team devices, Open vSwitch, VRFs, macvlan, ipvlan, other tunnel devices bound to a NIC, Wi-Fi, and NICs that are not Ethernet are refused when a NIC is at or under them: nothing is written, and the error names the interface. So are multipath routes and routes over nexthop objects that the network configuration set up, bridges with VLAN filtering, VLAN priority maps and two NICs with the same MAC address.
+- A virtual function its driver pairs with a NIC, as on Azure, is left to that driver: the NIC's file matches its driver as well as its MAC address, which the two share. Where the driver does not tell them apart either, as with virtio's net_failover, the install is refused.
+
+If the cloud-config configures the network itself, writing files under `/etc/systemd/network/`, `/run/systemd/network/`, `/etc/systemd/resolved.conf*` or `/etc/resolv.conf`, setting `dns` in a stage, or passing `ip=` in `install.grub_options`, nothing is carried and the cloud-config's configuration applies alone. networkd uses the first file matching a NIC, so a carried file could silently override part of yours. What a stage's `commands` do is not checked.
+
 ## Tested
 
 - Ubuntu 24.04 cloud image on QEMU with OVMF: UEFI, Secure Boot off, a 20 GiB virtio disk and an active swap file on the root filesystem. Target was Hadron v0.5.1 with Kairos v4.3.0. Kairos came up in active boot on the first reboot and accepted the SSH key from the cloud-config.
+- The same, with the network carried over and DHCP off: one NIC at a static address, renamed `lan0` on Ubuntu, with an extra route, MTU 1400, a nameserver and a search domain; and an active-backup bond of two NICs at a static address. SSH reached the VM only at that static address, and Kairos came back there, the NIC found by its MAC under its new name, the bond with its mode, primary port and MII interval, and the routes, MTU and DNS in place.
 
 ## Limitations
 

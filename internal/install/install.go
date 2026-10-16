@@ -25,6 +25,7 @@ import (
 	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 	"github.com/lexfrei/boot-to-kairos/internal/loop"
 	"github.com/lexfrei/boot-to-kairos/internal/mountns"
+	"github.com/lexfrei/boot-to-kairos/internal/netcfg"
 	"github.com/lexfrei/boot-to-kairos/internal/quiesce"
 	"github.com/lexfrei/boot-to-kairos/internal/sandbox"
 )
@@ -35,6 +36,8 @@ type Options struct {
 	Disk       string
 	ConfigPath string
 	Yes        bool
+	// KeepNetwork carries the host's network configuration over.
+	KeepNetwork bool
 }
 
 var (
@@ -120,6 +123,11 @@ func Run(ctx context.Context, o Options) error {
 	if len(clashes) > 0 {
 		return errors.Newf("host partitions already carry %s, which kairos-agent finds its own partitions by; "+
 			"it would format or mount those instead. Rename them first", strings.Join(clashes, ", "))
+	}
+	if o.KeepNetwork {
+		if cfg, err = netcfg.Carry(cfg, netcfg.Capture, log.Printf); err != nil {
+			return err
+		}
 	}
 	if !o.Yes {
 		if err := confirm(ctx, os.Stdin, os.Stdout, o); err != nil {
