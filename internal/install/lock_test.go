@@ -35,15 +35,16 @@ func TestASecondRunRefusesWhileOneIsRunning(t *testing.T) {
 	lock := filepath.Join(dir, "btk.lock")
 	started, release, done := make(chan struct{}), make(chan struct{}), make(chan error)
 	go func() {
-		done <- withWorkLock(lock, "", func(string, bool) {}, func(*bool) error {
+		_, err := withWorkLock(lock, "", func(string, bool) {}, func(*bool) error {
 			close(started)
 			<-release
 			return nil
 		})
+		done <- err
 	}()
 	<-started
 	ran := false
-	err := withWorkLock(lock, "", func(string, bool) {}, func(*bool) error { ran = true; return nil })
+	_, err := withWorkLock(lock, "", func(string, bool) {}, func(*bool) error { ran = true; return nil })
 	if !errors.Is(err, ErrAlreadyRunning) || ran {
 		t.Fatalf("second run = %v, ran %v, want ErrAlreadyRunning without running", err, ran)
 	}
@@ -51,7 +52,7 @@ func TestASecondRunRefusesWhileOneIsRunning(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("first run = %v", err)
 	}
-	if err := withWorkLock(lock, "", func(string, bool) {}, func(*bool) error { return nil }); err != nil {
+	if _, err := withWorkLock(lock, "", func(string, bool) {}, func(*bool) error { return nil }); err != nil {
 		t.Fatalf("a run after the first ended = %v, want it to get the lock", err)
 	}
 }
@@ -60,7 +61,7 @@ func TestTheWorkDirIsDroppedUnderTheLock(t *testing.T) {
 	lock := filepath.Join(t.TempDir(), "btk.lock")
 	want := unix.EIO
 	dropped := false
-	err := withWorkLock(lock, "/run/work", func(dir string, frozen bool) {
+	frozen, err := withWorkLock(lock, "/run/work", func(dir string, frozen bool) {
 		dropped = true
 		if dir != "/run/work" || !frozen {
 			t.Errorf("drop(%q, %v), want the work dir and what run said about the point of no return", dir, frozen)
@@ -72,8 +73,8 @@ func TestTheWorkDirIsDroppedUnderTheLock(t *testing.T) {
 		*frozen = true
 		return want
 	})
-	if !errors.Is(err, want) || !dropped {
-		t.Fatalf("withWorkLock = %v, dropped %v, want the run's error and the work dir dropped", err, dropped)
+	if !errors.Is(err, want) || !dropped || !frozen {
+		t.Fatalf("withWorkLock = %v, %v, dropped %v, want the run's error and flag, and the work dir dropped", frozen, err, dropped)
 	}
 	if heldBySomeoneElse(t, lock) {
 		t.Fatal("the lock is still held after the run")

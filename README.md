@@ -14,6 +14,7 @@ This is early work, tested on one setup only (see below). It erases the target d
 6. It flushes the filesystems on other disks, each on its own so the old ones on the target disk stay untouched.
 7. It writes a UEFI boot entry for Kairos, puts it in the boot order where the old system stood (see below), and reboots into Kairos.
 
+
 ## UEFI boot entry
 
 Once the disk is written and verified, a boot entry named `Kairos` is written to the firmware's NVRAM through efivarfs. It loads `\EFI\BOOT\BOOTX64.EFI` (`BOOTAA64.EFI` on arm64, `BOOTRISCV64.EFI` on riscv64), the shim the image installs, from the new EFI system partition, which it names by the partition GUID in the new partition table. If an identical entry exists, it is reused.
@@ -78,6 +79,18 @@ sudo ./boot-to-kairos \
 ```
 
 `--dry-run` does everything up to the point of no return: every check and refusal, the network capture and its refusals (see [Network](#network)), the image pull and the full build of the disk image with the image's `kairos-agent`, and the resolution of what the quiesce would stop. Then it stops, without asking, before turning off swap or freezing anything, and prints the plan to stdout in the order the install worked it out: the image, the network it would carry over (the files it writes and the static addresses and routes they set, or why it carries none), the target disk with its size and sector size, how much of the disk image the build filled, the boot entry it would write (see [UEFI boot entry](#uefi-boot-entry)), the swap areas it would turn off and the filesystems it would freeze or remount read-only. The disk, its swap, its filesystems and the firmware's NVRAM are left alone, apart from what the cloud-config's own install-time stages do (see [Limitations](#limitations)), and what the build mounted goes away with its mount namespace. It exits with 0 when every check before the point of no return passes, and with the refusal otherwise. A passing dry run does not promise a passing real run. Three things it cannot try can still stop the real run: turning off swap, which pulls its pages back into the memory the build filled; a freeze or read-only remount; and a first write attempt that fails before it writes anything. The real run then handles them as step 4 describes. Like the real run, it lets the agent run `udevadm trigger` (see step 3 above).
+
+### Output for automation
+
+With `--output json`, stdout carries a single JSON object and nothing else; logs and the confirmation prompt go to stderr. A dry run prints it at the end. A real run prints it right before the point of no return, or at the refusal if it stops before that; its `passed` covers the checks up to that point, and what happens after it shows only in the exit status and on stderr. Past the point of no return stdout may be a file on the frozen disk, so from there on only stderr and the kernel log (`/dev/kmsg`) get anything.
+
+```json
+{"dryRun":true,"passed":true,"plan":[{"name":"image","value":"quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0"},{"name":"swap to turn off","values":["/swap.img"]}],"refusal":null}
+```
+
+`plan` lists the items in the order the text output does; an item has `value`, or `values` when it is a list. `refusal` is `null` when every check passed, and otherwise has the message and a `class`: `usage`, `not-whole-disk`, `bad-config`, `bios-unsupported`, `label-clash`, `aborted`, `not-enough-memory`, `already-running`, `disk-in-use`, `network-unsupported`, `interrupted`, or `error` for anything else.
+
+Errors before the installer itself starts, flags it cannot parse, not running as root and a failure to set up its mount namespace, print no object. Exit status, in either output mode: 0 when a dry run passed; 1 when it refused, or when a real run refused or failed (a real run that succeeds reboots and never exits); 2 for flags it cannot parse; 128 plus the signal number when the installer was killed by a signal.
 
 ## Network
 
