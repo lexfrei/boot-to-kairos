@@ -20,6 +20,22 @@ This is early work, tested on one setup only (see below). It erases the target d
 - A Kairos image for the host's architecture that ships `kairos-agent`.
 - A cloud-config that lets you log in to the installed system, for example a user with an SSH key.
 
+## Install
+
+Each release has static binaries for linux/amd64 and linux/arm64 and a `SHA256SUMS` file. Replace `vX.Y.Z` with the release you want:
+
+```bash
+VERSION=vX.Y.Z
+ARCH=amd64 # or arm64
+curl --fail --location --remote-name-all \
+  "https://github.com/lexfrei/boot-to-kairos/releases/download/$VERSION/boot-to-kairos-linux-$ARCH" \
+  "https://github.com/lexfrei/boot-to-kairos/releases/download/$VERSION/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+chmod +x "boot-to-kairos-linux-$ARCH"
+mv "boot-to-kairos-linux-$ARCH" boot-to-kairos
+./boot-to-kairos --version
+```
+
 ## Usage
 
 ```bash
@@ -52,3 +68,7 @@ sudo ./boot-to-kairos \
 - Legacy BIOS is not supported yet.
 - `--disk` must be a physical disk. An LVM volume, an md array or a loop device is refused: the firmware cannot boot from a disk image inside one.
 - Some layouts are refused before anything is downloaded: any ZFS mount, because sysfs does not tell which disks a pool is on; a target disk under an md array, bcache or any device-mapper target other than linear, striped, crypt and multipath (LVM cache and thin pools, snapshots, RAID, integrity, VDO), because those may write to it on their own whatever is frozen; a filesystem on the target disk that is mounted only inside a container or another mount namespace; a process, such as a virtual machine, that has a device of the target disk open for writing; and any host partition already carrying a name or filesystem label kairos-agent will use (efi, oem, recovery, state, persistent, COS_*, and whatever the cloud-config's `install` section or the host's kernel command line adds), because the agent finds the partitions it formats and mounts by those, not on the disk it was given. Only namespaces that have a running process are seen; one kept open without a process, as snapd does, is not. A swap file whose size does not match what the kernel reports for it, which a swap header smaller than the file or a filesystem block smaller than a page can cause, is refused as possibly not the active one; recreate it with `mkswap` to proceed. A configuration the agent would fetch or merge from elsewhere, `config_url` in the cloud-config or `kairos.config`, `kairos.config_url`, `cos.setup` or `config_url` on the kernel command line, is refused too, as it cannot be checked: put it in the cloud-config itself.
+
+## CI
+
+Every push and pull request is built, vetted, linted with golangci-lint and the repository's `.golangci.yml`, and tested with `-race`. The tests that need root, which attach loop devices and create device-mapper devices, run through `sudo` on the throwaway GitHub-hosted runner, and the job fails if any test is skipped. An end-to-end job boots a throwaway Ubuntu UEFI VM with an active swap file on the runner's KVM, replaces it with Kairos and passes only if the machine comes back in active boot with the cloud-config's SSH key. Once all of that passes, the same run builds the release binaries and checks that they are static and report their version. On a pushed `v*` tag it then publishes them as a GitHub release, so nothing is published that the run did not test.

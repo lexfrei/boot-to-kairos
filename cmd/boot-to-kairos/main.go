@@ -20,13 +20,22 @@ import (
 	"github.com/lexfrei/boot-to-kairos/internal/mountns"
 )
 
+// version is stamped at release build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	var o install.Options
 	flag.StringVar(&o.Image, "image", "", "Kairos OCI image, for example quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0")
 	flag.StringVar(&o.Disk, "disk", "", "whole disk to replace, for example /dev/sda (all data is erased)")
 	flag.StringVar(&o.ConfigPath, "cloud-config", "", "cloud-config for the installed system; it must give you a way to log in")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask for confirmation")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Fprintln(os.Stdout, "boot-to-kairos", version)
+		return
+	}
 
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "boot-to-kairos must run as root")
