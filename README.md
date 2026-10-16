@@ -11,7 +11,18 @@ This is early work, tested on one setup only (see below). It erases the target d
 3. Until this point the running system is not touched, with one exception: the agent runs `udevadm trigger`, which replays device events host-wide, so udev rules on the host run again and may, for example, activate an LVM volume group left inactive. Everything above runs in a mount namespace of its own, so nothing it mounts reaches the rest of the system, and all of it goes away once the installer and whatever it started have exited, however they exit.
 4. It turns off the swap on the target disk, partitions and files alike, and freezes every filesystem on it, so nothing writes to the disk anymore. A filesystem that cannot be frozen, like the vfat ESP, is remounted read-only instead. If any of this fails, or the first write attempt fails before its first byte, what was done is undone and nothing is written.
 5. It copies the file over the disk. Data is copied and holes are zeroed. Then it reads the disk back, bypassing the page cache, and writes again any page that differs. If that fails, it tries the whole write again, three attempts in all. The machine sits frozen while the whole disk is written and read back, which on a large HDD takes a long time. Do not reset it.
-6. It flushes the filesystems on other disks, each on its own so the old ones on the target disk stay untouched, and reboots into Kairos.
+6. It flushes the filesystems on other disks, each on its own so the old ones on the target disk stay untouched.
+7. It writes a UEFI boot entry for Kairos, puts it in the boot order where the old system stood (see below), and reboots into Kairos.
+
+## UEFI boot entry
+
+Once the disk is written and verified, a boot entry named `Kairos` is written to the firmware's NVRAM through efivarfs. It loads `\EFI\BOOT\BOOTX64.EFI` (`BOOTAA64.EFI` on arm64, `BOOTRISCV64.EFI` on riscv64), the shim the image installs, from the new EFI system partition, which it names by the partition GUID in the new partition table. If an identical entry exists, it is reused.
+
+Entries that point at a partition of the replaced disk are removed, together with a `BootNext` that names one: after the write those partitions are gone. A partition is recognised by its GPT partition GUID, or by the disk signature on an MBR disk, both read before the disk is overwritten. Another disk cloned from the target without new GUIDs or signature looks the same, and its entries go too; the firmware cannot tell such disks apart either. If the NVRAM is full, the old entries are removed first to make room.
+
+In `BootOrder` the new entry takes the place of whichever comes first, an old entry or the reused one, so the firmware does not have to fall back to the disk's default loader on its own, and a machine set to boot from the network first, as provisioning systems do, still does when the old system had an entry of its own. Only when `BootOrder` named none of them does the new entry go first. Entries for other disks, network boot and the firmware's own entries keep their order.
+
+Nothing in NVRAM changes unless the disk was written and read back without error. The build does not see the firmware's variables at all: inside its chroot efivarfs, and the older sysfs interface at `/sys/firmware/efi/vars` that kernels before 6.0 also offer, are covered by an empty read-only tmpfs, so a boot entry written by kairos-agent or a cloud-config stage fails instead of reaching NVRAM before the disk is verified. A stage that mounts efivarfs or sysfs again on its own is not stopped. If writing the entry fails after that, the error is logged, the machine still reboots, and the firmware has to fall back to `\EFI\BOOT\BOOTX64.EFI` on the disk, as OVMF does and some firmware may not. Without efivarfs mounted read-write at `/sys/firmware/efi/efivars` no entry is written, and a warning says so before the disk is touched.
 
 ## Requirements
 
@@ -80,7 +91,6 @@ If the cloud-config configures the network itself, writing files under `/etc/sys
 ## Limitations
 
 - The cloud-config's install-time stages run inside the build with the host's real devices visible. A stage that acts on the target disk acts on the running system, before anything is quiesced.
-- No UEFI boot entry is created. Once the old system's entry stops resolving, the firmware has to fall back to `\EFI\BOOT\BOOTX64.EFI` on the disk. OVMF does that, some firmware may not.
 - Secure Boot is not tested. The installed system boots the shim and GRUB from the image, so it depends on that image and on the keys your firmware trusts.
 - Legacy BIOS is not supported yet.
 - `--disk` must be a physical disk. An LVM volume, an md array or a loop device is refused: the firmware cannot boot from a disk image inside one.
