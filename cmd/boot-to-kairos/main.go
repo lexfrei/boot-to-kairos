@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&o.Disk, "disk", "", "whole disk to replace, for example /dev/sda (all data is erased)")
 	flag.StringVar(&o.ConfigPath, "cloud-config", "", "cloud-config for the installed system; it must give you a way to log in")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask for confirmation")
+	flag.BoolVar(&o.KeepNetwork, "keep-network", true, "carry this system's addresses, routes, DNS, bonds, VLANs and bridges into the installed one, unless the cloud-config configures the network")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 
