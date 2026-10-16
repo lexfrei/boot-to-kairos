@@ -9,7 +9,7 @@ This is early work, tested on one setup only (see below). It erases the target d
 1. It pulls the Kairos OCI image and unpacks it into a tmpfs.
 2. It attaches a sparse file the size of the target disk as a loop device and runs the image's own `kairos-agent manual-install` on it, from a chroot of the image. Commands the agent would run against the whole host, `blkdeactivate` and a reboot or poweroff asked for in the config, are replaced with ones that do nothing. You get what that image's installer would give you: active, passive and recovery systems, and a persistent partition over the rest of the disk.
 3. Until this point the running system is not touched, with one exception: the agent runs `udevadm trigger`, which replays device events host-wide, so udev rules on the host run again and may, for example, activate an LVM volume group left inactive. Everything above runs in a mount namespace of its own, so nothing it mounts reaches the rest of the system, and all of it goes away once the installer and whatever it started have exited, however they exit.
-4. It turns off the swap on the target disk, partitions and files alike, and freezes every filesystem on it, so nothing writes to the disk anymore. A filesystem that cannot be frozen, like the vfat ESP, is remounted read-only instead. If any of this fails, or the first write attempt fails before its first byte, what was done is undone and nothing is written.
+4. It turns off the swap on the target disk, partitions and files alike, and freezes every filesystem on it, so nothing writes to the disk anymore. A filesystem that cannot be frozen, like the vfat ESP, is remounted read-only instead. If any of this fails, or the first write attempt fails before its first byte, what was done is undone and nothing is written. If the undo itself fails, it stops with a message that a filesystem may still be frozen and that you should reboot.
 5. It copies the file over the disk. Data is copied and holes are zeroed. Then it reads the disk back, bypassing the page cache, and writes again any page that differs. If that fails, it tries the whole write again, three attempts in all. The machine sits frozen while the whole disk is written and read back, which on a large HDD takes a long time. Do not reset it.
 6. It flushes the filesystems on other disks, each on its own so the old ones on the target disk stay untouched.
 7. It writes a UEFI boot entry for Kairos, puts it in the boot order where the old system stood (see below), and reboots into Kairos.
@@ -66,6 +66,18 @@ sudo ./boot-to-kairos \
 ```
 
 `--disk` also takes a link like `/dev/disk/by-id/...`. Without `--yes` it asks you to type the disk path before it starts, and for a link that is the kernel name it resolves to, like `/dev/sda`.
+
+### Dry run
+
+```bash
+sudo ./boot-to-kairos \
+  --image quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0 \
+  --disk /dev/sda \
+  --cloud-config config.yaml \
+  --dry-run
+```
+
+`--dry-run` does everything up to the point of no return: every check and refusal, the network capture and its refusals (see [Network](#network)), the image pull and the full build of the disk image with the image's `kairos-agent`, and the resolution of what the quiesce would stop. Then it stops, without asking, before turning off swap or freezing anything, and prints the plan to stdout in the order the install worked it out: the image, the network it would carry over (the files it writes and the static addresses and routes they set, or why it carries none), the target disk with its size and sector size, how much of the disk image the build filled, the swap areas it would turn off and the filesystems it would freeze or remount read-only. The disk, its swap and its filesystems are left alone, and what the build mounted goes away with its mount namespace. It exits with 0 when every check before the point of no return passes, and with the refusal otherwise. A passing dry run does not promise a passing real run. Three things it cannot try can still stop the real run: turning off swap, which pulls its pages back into the memory the build filled; a freeze or read-only remount; and a first write attempt that fails before it writes anything. The real run then handles them as step 4 describes. Like the real run, it lets the agent run `udevadm trigger` (see step 3 above).
 
 ## Network
 
