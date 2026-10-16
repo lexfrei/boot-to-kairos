@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -168,5 +169,129 @@ func TestSourceCarriesNothingTheInstallerAdds(t *testing.T) {
 	}
 	if len(leaked) != 0 {
 		t.Fatalf("installer artifacts visible in the install source: %v", leaked)
+	}
+}
+
+type mountCall struct {
+	src, target, fstype string
+	flags               uintptr
+}
+
+func recordMounts(calls *[]mountCall, err error) func(string, string, string, uintptr, string) error {
+	return func(src, target, fstype string, flags uintptr, _ string) error {
+		*calls = append(*calls, mountCall{src, target, fstype, flags})
+		return err
+	}
+}
+
+// kairos-agent must not reach NVRAM before the disk it installs onto has
+// been written and verified, so the variables are covered for the build.
+// Kernels before 6.0 also expose the variables through the sysfs vars
+// directory, which libefivar falls back to when efivars is not efivarfs.
+func TestHideEFIVarsCoversThemReadOnly(t *testing.T) {
+	for _, dirs := range [][]string{{"efivars"}, {"vars"}, {"efivars", "vars"}} {
+		root := t.TempDir()
+		var want []string
+		for _, d := range dirs {
+			want = append(want, filepath.Join(root, "sys/firmware/efi", d))
+			if err := os.MkdirAll(want[len(want)-1], 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var calls []mountCall
+		if err := hideEFIVars(root, recordMounts(&calls, nil)); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, c := range calls {
+			if c.fstype != "tmpfs" || c.flags&unix.MS_RDONLY == 0 {
+				t.Errorf("mount %+v is not a read-only tmpfs", c)
+			}
+			got = append(got, c.target)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("mounted on %v, want %v", got, want)
+		}
+	}
+}
+
+func TestHideEFIVarsWithoutEFI(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sys/firmware"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var calls []mountCall
+	if err := hideEFIVars(root, recordMounts(&calls, nil)); err != nil || len(calls) != 0 {
+		t.Fatalf("%v, mounts %+v; nothing to hide", err, calls)
+	}
+}
+
+func TestHideEFIVarsFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sys/firmware/efi/efivars"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var calls []mountCall
+	if err := hideEFIVars(root, recordMounts(&calls, unix.EPERM)); !errors.Is(err, unix.EPERM) {
+		t.Fatalf("mount failure gave %v", err)
+	}
+	// A path that cannot be checked is not taken as absent.
+	file := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(file, "sys/firmware"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(file, "sys/firmware/efi"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hideEFIVars(file, recordMounts(&calls, nil)); err == nil {
+		t.Fatal("an unreadable efivars path taken as absent")
+	}
+}
+
+// The real mounts, on stand-ins: the build sees no variables while the
+// stand-in for the host's efivarfs keeps them.
+func TestSetupHidesEFIVars(t *testing.T) {
+	requireRoot(t)
+	root, binds := fixture(t)
+	host := filepath.Join(filepath.Dir(root), "host-sys")
+	hostVars := filepath.Join(host, "firmware/efi/efivars")
+	if err := os.MkdirAll(hostVars, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(host, "firmware/efi/vars/new_var")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	boot := filepath.Join(hostVars, "Boot0000-8be4df61-93ca-11d2-aa0d-00e098032b8c")
+	if err := os.WriteFile(boot, []byte{7, 0, 0, 0, 1}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binds = append(binds, Bind{Src: host, Dst: "sys"})
+	if err := Setup(root, binds); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(root, "sys/firmware/efi/efivars")
+	for _, d := range []string{inside, filepath.Join(root, "sys/firmware/efi/vars")} {
+		if ents, err := os.ReadDir(d); err != nil || len(ents) != 0 {
+			t.Fatalf("the build sees %v, %v in %s", ents, err, d)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(inside, "Boot0001-8be4df61-93ca-11d2-aa0d-00e098032b8c"), []byte{7, 0, 0, 0}, 0o644); !errors.Is(err, unix.EROFS) {
+		t.Fatalf("writing a variable in the build: %v, want EROFS", err)
+	}
+	if err := Teardown(root); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(boot); err != nil || len(b) != 5 {
+		t.Fatalf("host stand-in variable after teardown: %x, %v", b, err)
+	}
+	if ents, _ := os.ReadDir(hostVars); len(ents) != 1 {
+		t.Fatalf("host stand-in holds %v", ents)
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatalf("host stand-in for the legacy interface: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ package sandbox
 import (
 	"bufio"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -71,8 +72,9 @@ func MountsUnder(mountinfo io.Reader, root string) ([]string, error) {
 	return out, nil
 }
 
-// Setup recursively binds each existing Src at root/Dst and adds a read-only,
-// non-recursive bind of root itself at root/SourceDir.
+// Setup recursively binds each existing Src at root/Dst, hides the EFI
+// variables under the bound /sys, and adds a read-only, non-recursive bind of
+// root itself at root/SourceDir.
 func Setup(root string, binds []Bind) error {
 	run := filepath.Join(root, "run")
 	if err := os.MkdirAll(run, 0o755); err != nil {
@@ -97,6 +99,9 @@ func Setup(root string, binds []Bind) error {
 		if err := unix.Mount("", dst, "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
 			return errors.Wrapf(err, "make %s a slave mount", dst)
 		}
+	}
+	if err := hideEFIVars(root, unix.Mount); err != nil {
+		return err
 	}
 	src := filepath.Join(root, SourceDir)
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -159,4 +164,25 @@ func unescape(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+// hideEFIVars covers the firmware's variables with an empty read-only tmpfs:
+// efivarfs, and the sysfs interface kernels before 6.0 also offer, which
+// libefivar falls back to. NVRAM must not change before the disk is written
+// and verified, and the agent or a cloud-config stage could otherwise write
+// a boot entry from the build. The mounts stay in the sandbox: its /sys is a
+// slave of the host's. EFI mode itself stays visible.
+func hideEFIVars(root string, mount func(string, string, string, uintptr, string) error) error {
+	for _, d := range []string{"efivars", "vars"} {
+		dir := filepath.Join(root, "sys/firmware/efi", d)
+		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return errors.Wrap(err, "check the EFI variables")
+		}
+		if err := mount("tmpfs", dir, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "mode=0555,size=4k"); err != nil {
+			return errors.Wrapf(err, "hide %s from the build", dir)
+		}
+	}
+	return nil
 }
