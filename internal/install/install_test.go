@@ -6,11 +6,16 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	cerrors "github.com/cockroachdb/errors"
+	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 )
 
 // fakeSys builds just enough of /sys for disk and firmware checks.
@@ -83,7 +88,7 @@ func TestValidate(t *testing.T) {
 		{name: "logical volume", mod: func(o *Options) { o.Disk = "/dev/mapper/vg-root" }, uefi: true, want: ErrNotWholeDisk},
 		{name: "by-id link", mod: func(o *Options) { o.Disk = "/dev/disk/by-id/virtio-root" }, uefi: true, want: nil},
 		{name: "bad config", mod: func(o *Options) { o.ConfigPath = config(t, "users: []\n") }, uefi: true, want: ErrBadConfig},
-		{name: "bios", mod: func(*Options) {}, uefi: false, want: ErrBIOSUnsupported},
+		{name: "bios", mod: func(*Options) {}, uefi: false, want: nil},
 		{name: "json output", mod: func(o *Options) { o.Output = OutputJSON }, uefi: true, want: nil},
 		{name: "unknown output", mod: func(o *Options) { o.Output = "yaml" }, uefi: true, want: ErrBadOutput},
 	}
@@ -96,6 +101,104 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestFirmware(t *testing.T) {
+	for uefi, want := range map[bool]string{true: kairos.EFI, false: kairos.BIOS} {
+		if got, err := Firmware(fakeSys(t, uefi)); err != nil || got != want {
+			t.Errorf("uefi %v: %q, %v, want %q", uefi, got, err, want)
+		}
+	}
+	// Only a /sys/firmware/efi known to be absent means legacy BIOS.
+	sys := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sys, "firmware"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Firmware(sys); err == nil {
+		t.Fatalf("got %q from a firmware path that cannot be read", got)
+	}
+}
+
+// SeaBIOS does not even list a disk with 4096-byte sectors, and legacy
+// firmware commonly cannot read one either.
+func TestCheckBootable(t *testing.T) {
+	for _, tc := range []struct {
+		firmware string
+		sector   int
+		ok       bool
+	}{
+		{kairos.BIOS, 512, true},
+		{kairos.BIOS, 4096, false},
+		{kairos.EFI, 4096, true},
+		{kairos.EFI, 512, true},
+	} {
+		if err := checkBootable(tc.firmware, tc.sector); (err == nil) != tc.ok {
+			t.Errorf("%s with %d-byte sectors: %v", tc.firmware, tc.sector, err)
+		}
+	}
+}
+
+func TestCheckFirmware(t *testing.T) {
+	sectors := func(n int, err error) func(string) (int, error) {
+		return func(string) (int, error) { return n, err }
+	}
+	plain := []byte("#cloud-config\n")
+	for _, tc := range []struct {
+		name   string
+		cfg    []byte
+		uefi   bool
+		arch   string
+		sector func(string) (int, error)
+		want   error
+	}{
+		{name: "bios", cfg: plain, sector: sectors(512, nil)},
+		// Without UEFI, an arm64 board booted its kernel from U-Boot or the
+		// like: there is no legacy BIOS to install for.
+		{name: "no UEFI on arm64", cfg: plain, arch: "arm64", sector: sectors(512, nil), want: ErrBIOSUnsupported},
+		{name: "uefi on arm64", cfg: plain, uefi: true, arch: "arm64", sector: sectors(512, nil)},
+		{name: "uefi with 4K sectors", cfg: plain, uefi: true, sector: sectors(4096, nil)},
+		{name: "bios with 4K sectors", cfg: plain, sector: sectors(4096, nil), want: ErrBIOSUnsupported},
+		{name: "bios told efi", cfg: []byte("#cloud-config\ninstall: {firmware: efi}\n"), sector: sectors(512, nil), want: ErrBadConfig},
+		{name: "unknown sector size", cfg: plain, uefi: true, sector: sectors(512, errNotBlockDevice), want: errNotBlockDevice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			arch := tc.arch
+			if arch == "" {
+				arch = "amd64"
+			}
+			firmware, err := checkFirmware(tc.cfg, fakeSys(t, tc.uefi), arch, "/dev/vda", tc.sector)
+			// errors.Mark is seen only by cockroachdb's Is, as errorClass uses.
+			if !cerrors.Is(err, tc.want) || (tc.want == nil) != (err == nil) || (err != nil && firmware != "") {
+				t.Fatalf("firmware %q, err = %v, want %v", firmware, err, tc.want)
+			}
+			if want := map[bool]string{true: kairos.EFI, false: kairos.BIOS}[tc.uefi]; err == nil && firmware != want {
+				t.Fatalf("firmware %q, want %q", firmware, want)
+			}
+		})
+	}
+}
+
+// Legacy BIOS boots the disk's boot sector and has no NVRAM entries: there
+// is neither an entry to prepare nor a fallback to warn about.
+func TestBootEntryOnBIOS(t *testing.T) {
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	summary := &Plan{}
+	plan, err := bootEntry(fakeSys(t, false), "/nonexistent/image.raw", "/nonexistent/disk", summary)
+	var out strings.Builder
+	summary.Print(&out)
+	if plan != nil || err != nil || logged.Len() != 0 || !strings.Contains(out.String(), "legacy BIOS") {
+		t.Fatalf("plan %v, err %v, logged %q, summary:\n%s", plan, err, logged.String(), out.String())
+	}
+	// An unreadable firmware path is not taken for legacy BIOS.
+	sys := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sys, "firmware"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bootEntry(sys, "/nonexistent/image.raw", "/nonexistent/disk", &Plan{}); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("an unreadable firmware path gave %v", err)
 	}
 }
 
@@ -143,5 +246,16 @@ func TestConfirmAcceptsTheDiskPath(t *testing.T) {
 	}
 	if err := confirm(t.Context(), strings.NewReader("yes\n"), io.Discard, Options{Disk: "/dev/vda"}); !errors.Is(err, ErrAborted) {
 		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+}
+
+func TestBootEntryNamesUEFI(t *testing.T) {
+	summary := &Plan{}
+	// Past the mode, the outcome depends on this host's efivarfs.
+	_, _ = bootEntry(fakeSys(t, true), "/nonexistent/image.raw", "/nonexistent/disk", summary)
+	var out strings.Builder
+	summary.Print(&out)
+	if !strings.Contains(out.String(), "firmware") || !strings.Contains(out.String(), "UEFI") {
+		t.Fatalf("summary:\n%s", out.String())
 	}
 }

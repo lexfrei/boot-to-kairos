@@ -233,3 +233,20 @@ func TestTargetsCountMountedLabelsOfUnformattedPartitions(t *testing.T) {
 		t.Errorf("names = %v: an unformatted partition is not looked up by name", names)
 	}
 }
+
+// The agent creates its bios partition but never looks one up by name: it
+// skips it when formatting, and grub-install finds it on the device it is
+// given by its type GUID.
+func TestHostBIOSPartitionDoesNotClash(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Symlink("../../sda14", filepath.Join(dir, "bios")); err != nil {
+		t.Fatal(err)
+	}
+	names, _, err := Targets([]byte("#cloud-config\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := LabelClashes(dir, names); len(got) != 0 {
+		t.Fatalf("clashes = %v", got)
+	}
+}

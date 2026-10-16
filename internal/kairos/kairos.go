@@ -168,8 +168,9 @@ func LabelClashes(dir string, names []string) []string {
 // /dev/disk/by-partlabel, and those it mounts by filesystem label, through
 // /dev/disk/by-label, rather than on the device it was given; a host
 // partition carrying one of them is taken instead. These are the defaults
-// of kairos-agent v4; legacy boot's bios partition is left out, as legacy
-// boot is refused.
+// of kairos-agent v4. Legacy boot's bios partition is left out: the agent
+// skips it when formatting, and grub-install finds it on the device it is
+// given by its type GUID, never by name.
 var (
 	defaultNames  = []string{"efi", "oem", "recovery", "state", "persistent"}                                                             //nolint:gochecknoglobals // fixed list
 	defaultLabels = []string{"COS_GRUB", "COS_OEM", "COS_OEM_LUKS", "COS_RECOVERY", "COS_STATE", "COS_PERSISTENT", "COS_PERSISTENT_LUKS"} //nolint:gochecknoglobals // fixed list
