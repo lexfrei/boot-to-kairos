@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Boots a throwaway Ubuntu UEFI VM, runs boot-to-kairos in it against its own
+# Boots a throwaway Ubuntu VM, runs boot-to-kairos in it against its own
 # disk, and checks that the machine comes back as Kairos in active boot.
+# FIRMWARE=bios boots it with SeaBIOS instead of OVMF.
 # Usage: run.sh <boot-to-kairos binary> <Kairos image>
 set -euo pipefail
 
 bin=$(realpath "$1")
 image=$2
+firmware=${FIRMWARE:-uefi}
 work=${WORK:-$PWD/e2e-work}
 mkdir -p "$work"
 cd "$work"
@@ -29,7 +31,12 @@ ssh-keygen -q -t ed25519 -N '' -C btk-e2e -f id_ed25519
 curl --fail --silent --show-error --location --output noble.img \
 	https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 qemu-img create -q -f qcow2 -b noble.img -F qcow2 disk.qcow2 20G
-cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
+pflash=()
+if [ "$firmware" = uefi ]; then
+	cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
+	pflash=(-drive "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd"
+		-drive "if=pflash,format=raw,file=vars.fd")
+fi
 cat >user-data <<EOC
 #cloud-config
 users:
@@ -42,9 +49,7 @@ EOC
 printf 'instance-id: btk-e2e\nlocal-hostname: btk-e2e\n' >meta-data
 cloud-localds seed.img user-data meta-data
 
-qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -smp 4 -m 6144 \
-	-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-	-drive if=pflash,format=raw,file=vars.fd \
+qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -smp 4 -m 6144 "${pflash[@]}" \
 	-drive file=disk.qcow2,if=virtio,format=qcow2,discard=unmap,detect-zeroes=unmap \
 	-drive file=seed.img,if=virtio,format=raw \
 	-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=n0 \
@@ -95,6 +100,16 @@ vm kairos@127.0.0.1 'lsblk -o NAME,SIZE,LABEL /dev/vda'
 state=$(vm kairos@127.0.0.1 'kairos-agent state get boot')
 echo "boot state: $state"
 test "$state" = active_boot
+
+# Legacy BIOS boots GRUB from the boot sector and the GPT's BIOS boot
+# partition; Kairos must have come up without EFI.
+if [ "$firmware" = bios ]; then
+	vm kairos@127.0.0.1 'test ! -e /sys/firmware/efi'
+	vm kairos@127.0.0.1 'sudo sfdisk --dump /dev/vda' | tee table.txt
+	grep --quiet 'type=21686148-6449-6E6F-744E-656564454649' table.txt
+	echo "legacy BIOS: no /sys/firmware/efi, a BIOS boot partition on /dev/vda"
+	exit 0
+fi
 
 # OVMF falls back to \EFI\BOOT\BOOTX64.EFI on its own, so active boot alone
 # would pass without a boot entry. The firmware must have booted the entry
