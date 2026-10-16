@@ -805,3 +805,14 @@ func TestDmTargetsFromWipesTheReply(t *testing.T) {
 		}
 	}
 }
+
+func TestStopOfListsWhatDiskActsOn(t *testing.T) {
+	got := stopOf(
+		[]Mount{{ID: "30", Point: "/"}, {ID: "31", Point: "/boot/efi"}},
+		[]Swap{{Path: "/swap.img", Prio: 5}, {Path: "/dev/vda3", Prio: -2}},
+	)
+	want := Stop{Swaps: []string{"/dev/vda3", "/swap.img"}, Filesystems: []string{"/", "/boot/efi"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stopOf = %+v, want %+v: swaps in the order Disk turns them off", got, want)
+	}
+}
