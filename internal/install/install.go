@@ -56,7 +56,8 @@ var (
 )
 
 const (
-	workDir = "/run/boot-to-kairos"
+	workDir  = "/run/boot-to-kairos"
+	lockFile = "/run/boot-to-kairos.lock"
 	// repairRounds bounds how often a page that differs on read-back is
 	// rewritten before giving up.
 	repairRounds = 3
@@ -107,6 +108,21 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 // Run installs the image and reboots into it. Every step before the disk is
 // quiesced leaves the running system as it was when it fails.
 func Run(ctx context.Context, o Options) error {
+	return withWorkLock(lockFile, workDir, dropWork, func(frozen *bool) error { return run(ctx, o, frozen) })
+}
+
+// dropWork drops the work tmpfs and, unless the disk may be frozen, the
+// directory under it: /run may be a directory on a filesystem of the
+// target disk, and an rmdir on a frozen filesystem waits for a thaw that
+// never comes.
+func dropWork(dir string, frozen bool) {
+	_ = unix.Unmount(dir, unix.MNT_DETACH)
+	if !frozen {
+		_ = os.Remove(dir)
+	}
+}
+
+func run(ctx context.Context, o Options, frozen *bool) error {
 	cfg, err := Validate(&o, "/sys", blockDevOf)
 	if err != nil {
 		return err
@@ -129,13 +145,13 @@ func Run(ctx context.Context, o Options) error {
 	}
 	plan := &Plan{}
 	plan.Add("image", o.Image)
-	return proceed(ctx, o, cfg, plan, os.Stdin, os.Stdout)
+	return proceed(ctx, o, cfg, plan, os.Stdin, os.Stdout, frozen)
 }
 
 // proceed asks, builds the image and replaces the disk with it. A dry run
 // does not ask, as it leaves the disk alone, and stops before the point of
-// no return.
-func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reader, out io.Writer) error {
+// no return. frozen is set once the disk may be quiesced.
+func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reader, out io.Writer, frozen *bool) error {
 	if !o.KeepNetwork {
 		plan.Add("network", "not carried (--keep-network=false)")
 	} else {
@@ -179,6 +195,7 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		plan.Print(out)
 		return nil
 	}
+	*frozen = true
 	log.Printf("point of no return: stopping writes to %s", o.Disk)
 	if err := enterPointOfNoReturn(); err != nil {
 		return err
@@ -640,4 +657,29 @@ func (p *Plan) Print(w io.Writer) {
 	for _, it := range p.items {
 		fmt.Fprintf(w, "  %-*s %s\n", width+1, it.name+":", it.value)
 	}
+}
+
+// ErrAlreadyRunning is returned while another instance holds the lock.
+var ErrAlreadyRunning = errors.New("another boot-to-kairos is running")
+
+// withWorkLock runs run while holding lock, then drops the work dir before
+// letting go, telling drop whether run passed the point of no return: the
+// work dir is shared through the host's /run, and an rmdir of it detaches
+// whatever another instance has mounted on it. A run that reboots never
+// returns, and the lock goes with the process.
+func withWorkLock(lock, dir string, drop func(dir string, frozen bool), run func(frozen *bool) error) error {
+	f, err := os.OpenFile(lock, os.O_RDONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return errors.Wrap(err, "open lock file")
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return errors.Wrapf(ErrAlreadyRunning, "%s is held", lock)
+		}
+		return errors.Wrap(err, "lock")
+	}
+	frozen := false
+	defer func() { drop(dir, frozen) }()
+	return run(&frozen)
 }

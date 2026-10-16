@@ -65,7 +65,7 @@ sudo ./boot-to-kairos \
   --cloud-config config.yaml
 ```
 
-`--disk` also takes a link like `/dev/disk/by-id/...`. Without `--yes` it asks you to type the disk path before it starts, and for a link that is the kernel name it resolves to, like `/dev/sda`.
+`--disk` also takes a link like `/dev/disk/by-id/...`. Without `--yes` it asks you to type the disk path before it starts, and for a link that is the kernel name it resolves to, like `/dev/sda`. A second instance refuses while one holds `/run/boot-to-kairos.lock`; versions from before this lock was added do not take it.
 
 ### Dry run
 

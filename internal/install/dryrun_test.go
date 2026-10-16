@@ -86,9 +86,10 @@ func TestDryRunStopsBeforeThePointOfNoReturn(t *testing.T) {
 	plan.Add("image", "quay.io/kairos/hadron:example")
 	var out bytes.Buffer
 	// Without --yes and with nothing to read, a prompt would abort.
-	err := proceed(context.Background(), Options{Disk: "/dev/vda", DryRun: true}, nil, plan, strings.NewReader(""), &out)
-	if err != nil {
-		t.Fatalf("proceed = %v, want nil: a dry run that would proceed succeeds", err)
+	frozen := false
+	err := proceed(context.Background(), Options{Disk: "/dev/vda", DryRun: true}, nil, plan, strings.NewReader(""), &out, &frozen)
+	if err != nil || frozen {
+		t.Fatalf("proceed = %v, past the point of no return %v; want nil and false: a dry run that would proceed succeeds", err, frozen)
 	}
 	if want := []string{"build", "prepare boot entry", "plan stop", "lock check"}; !slices.Equal(*calls, want) {
 		t.Fatalf("calls = %v, want %v: nothing after the build may run", *calls, want)
@@ -118,7 +119,7 @@ func TestDryRunReportsWhatWouldStopTheRealRun(t *testing.T) {
 		return quiesce.Stop{}, quiesce.ErrUnplaceable
 	}
 	var out bytes.Buffer
-	err := proceed(context.Background(), Options{Disk: "/dev/vda", DryRun: true}, nil, &Plan{}, strings.NewReader(""), &out)
+	err := proceed(context.Background(), Options{Disk: "/dev/vda", DryRun: true}, nil, &Plan{}, strings.NewReader(""), &out, new(bool))
 	if !errors.Is(err, quiesce.ErrUnplaceable) {
 		t.Fatalf("proceed = %v, want the refusal the real run would hit", err)
 	}
@@ -130,8 +131,12 @@ func TestDryRunReportsWhatWouldStopTheRealRun(t *testing.T) {
 func TestRealRunStillReachesTheReboot(t *testing.T) {
 	calls := stubMachine(t)
 	var out bytes.Buffer
-	if err := proceed(context.Background(), Options{Disk: "/dev/vda", Yes: true}, nil, &Plan{}, strings.NewReader(""), &out); err != nil {
+	frozen := false
+	if err := proceed(context.Background(), Options{Disk: "/dev/vda", Yes: true}, nil, &Plan{}, strings.NewReader(""), &out, &frozen); err != nil {
 		t.Fatalf("proceed = %v", err)
+	}
+	if !frozen {
+		t.Error("the real run passed the point of no return without saying so: the work dir may be removed from a frozen filesystem")
 	}
 	if want := []string{"build", "prepare boot entry", "point of no return", "quiesce", "write", "sync", "write boot entry", "reboot"}; !slices.Equal(*calls, want) {
 		t.Fatalf("calls = %v, want %v", *calls, want)
@@ -141,7 +146,7 @@ func TestRealRunStillReachesTheReboot(t *testing.T) {
 func TestRealRunAsksBeforeTheBuild(t *testing.T) {
 	calls := stubMachine(t)
 	var out bytes.Buffer
-	err := proceed(context.Background(), Options{Disk: "/dev/vda"}, nil, &Plan{}, strings.NewReader("/dev/sdb\n"), &out)
+	err := proceed(context.Background(), Options{Disk: "/dev/vda"}, nil, &Plan{}, strings.NewReader("/dev/sdb\n"), &out, new(bool))
 	if !errors.Is(err, ErrAborted) || len(*calls) != 0 {
 		t.Fatalf("proceed = %v after %v, want ErrAborted before anything ran", err, *calls)
 	}
@@ -160,7 +165,7 @@ func TestPlanSaysNoneForAnEmptyList(t *testing.T) {
 func TestDryRunReportsAFailedLock(t *testing.T) {
 	calls := stubMachine(t)
 	lockCheck = func() error { return unix.ENOMEM }
-	err := proceed(context.Background(), Options{Disk: "/dev/vda", DryRun: true}, nil, &Plan{}, strings.NewReader(""), io.Discard)
+	err := proceed(context.Background(), Options{Disk: "/dev/vda", DryRun: true}, nil, &Plan{}, strings.NewReader(""), io.Discard, new(bool))
 	if !errors.Is(err, unix.ENOMEM) || slices.Contains(*calls, "quiesce") {
 		t.Fatalf("proceed = %v after %v, want the mlockall failure the real run would hit", err, *calls)
 	}
@@ -202,7 +207,7 @@ func TestDryRunPrintsTheCarriedNetwork(t *testing.T) {
 	captureNetwork = func() (*netcfg.Host, error) { return staticHost(), nil }
 	var out bytes.Buffer
 	o := Options{Disk: "/dev/vda", DryRun: true, KeepNetwork: true}
-	if err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), &out); err != nil {
+	if err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), &out, new(bool)); err != nil {
 		t.Fatalf("proceed = %v after %v", err, *calls)
 	}
 	if !strings.Contains(string(builtConfig), "192.0.2.10/24") {
@@ -230,7 +235,7 @@ func TestDryRunRefusesWhatTheNetworkStepRefuses(t *testing.T) {
 			calls := stubMachine(t)
 			captureNetwork = capture
 			o := Options{Disk: "/dev/vda", DryRun: true, KeepNetwork: true}
-			err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), io.Discard)
+			err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), io.Discard, new(bool))
 			if err == nil || !strings.Contains(err.Error(), "--keep-network=false") || len(*calls) != 0 {
 				t.Fatalf("proceed = %v after %v, want the network refusal before anything ran", err, *calls)
 			}
@@ -250,7 +255,7 @@ func TestDryRunSaysWhenTheNetworkIsNotCarried(t *testing.T) {
 			calls := stubMachine(t)
 			var out bytes.Buffer
 			o := Options{Disk: "/dev/vda", DryRun: true, KeepNetwork: tc.keep}
-			if err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), &out); err != nil {
+			if err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), &out, new(bool)); err != nil {
 				t.Fatalf("proceed = %v", err)
 			}
 			if !regexp.MustCompile(tc.want).MatchString(out.String()) {
@@ -266,7 +271,7 @@ func TestDryRunSaysWhenTheNetworkIsNotCarried(t *testing.T) {
 func TestRealRunCarriesTheNetworkBeforeItAsks(t *testing.T) {
 	calls := stubMachine(t)
 	o := Options{Disk: "/dev/vda", Yes: true, KeepNetwork: true}
-	if err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), io.Discard); err != nil {
+	if err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader(""), io.Discard, new(bool)); err != nil {
 		t.Fatalf("proceed = %v", err)
 	}
 	if want := []string{"capture network", "build", "prepare boot entry", "point of no return", "quiesce", "write", "sync", "write boot entry", "reboot"}; !slices.Equal(*calls, want) {
@@ -277,7 +282,7 @@ func TestRealRunCarriesTheNetworkBeforeItAsks(t *testing.T) {
 	captureNetwork = func() (*netcfg.Host, error) { return nil, unix.EPERM }
 	var out bytes.Buffer
 	o.Yes = false
-	err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader("/dev/vda\n"), &out)
+	err := proceed(context.Background(), o, []byte(plainConfig), &Plan{}, strings.NewReader("/dev/vda\n"), &out, new(bool))
 	if !errors.Is(err, unix.EPERM) || len(*calls) != 0 || strings.Contains(out.String(), "Type the disk path") {
 		t.Fatalf("proceed = %v after %v, prompt %q: a network refusal must stop the real run before it asks", err, *calls, out.String())
 	}
