@@ -126,7 +126,7 @@ func Run(ctx context.Context, o Options) error {
 			"it would format or mount those instead. Rename them first", strings.Join(clashes, ", "))
 	}
 	if o.KeepNetwork {
-		if cfg, err = netcfg.Carry(cfg, netcfg.Capture, log.Printf); err != nil {
+		if cfg, _, err = netcfg.Carry(cfg, netcfg.Capture, log.Printf); err != nil {
 			return err
 		}
 	}

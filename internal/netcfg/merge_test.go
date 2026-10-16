@@ -5,6 +5,7 @@ package netcfg
 import (
 	"errors"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -150,7 +151,10 @@ func TestUserConfigures(t *testing.T) {
 }
 
 func TestCarry(t *testing.T) {
-	static := &Host{Links: []Link{nic(2, "lan0", "52:54:00:12:34:56", Addr{Prefix: netip.MustParsePrefix("10.0.2.50/24"), Global: true})}}
+	static := &Host{
+		Links:  []Link{nic(2, "lan0", "52:54:00:12:34:56", Addr{Prefix: netip.MustParsePrefix("10.0.2.50/24"), Global: true})},
+		Routes: []Route{route("0.0.0.0/0", "10.0.2.2", 2), route("198.51.100.0/24", "", 2)},
+	}
 	team := nic(2, "eth0", "52:54:00:12:34:56")
 	team.Master = 9
 	refused := &Host{Links: []Link{team, {Index: 9, Name: "team0", Kind: "team"}}}
@@ -160,34 +164,48 @@ func TestCarry(t *testing.T) {
 	quiet := func(string, ...any) {}
 
 	t.Run("user wins", func(t *testing.T) {
-		out, err := Carry([]byte(user), func() (*Host, error) {
+		out, got, err := Carry([]byte(user), func() (*Host, error) {
 			t.Error("captured although the user configures the network")
 			return nil, errBoom
 		}, quiet)
 		if err != nil || string(out) != user {
 			t.Errorf("out %q, err %v", out, err)
 		}
+		if !strings.Contains(got.Reason, "the cloud-config configures it") || got.Files != nil {
+			t.Errorf("carried = %+v, want the reason the user's configuration wins", got)
+		}
 	})
 	t.Run("refused", func(t *testing.T) {
-		_, err := Carry([]byte(plain), func() (*Host, error) { return refused, nil }, quiet)
+		_, _, err := Carry([]byte(plain), func() (*Host, error) { return refused, nil }, quiet)
 		if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "--keep-network=false") {
 			t.Errorf("err = %v, want ErrUnsupported naming the flag", err)
 		}
 	})
 	t.Run("nothing to carry", func(t *testing.T) {
-		out, err := Carry([]byte(plain), func() (*Host, error) { return dhcpOnly, nil }, quiet)
+		out, got, err := Carry([]byte(plain), func() (*Host, error) { return dhcpOnly, nil }, quiet)
 		if err != nil || string(out) != plain {
 			t.Errorf("out %q, err %v", out, err)
 		}
+		if !strings.Contains(got.Reason, "DHCP") || got.Files != nil {
+			t.Errorf("carried = %+v, want the reason nothing is carried", got)
+		}
 	})
 	t.Run("carried", func(t *testing.T) {
-		out, err := Carry([]byte(plain), func() (*Host, error) { return static, nil }, quiet)
+		out, got, err := Carry([]byte(plain), func() (*Host, error) { return static, nil }, quiet)
 		if err != nil || !strings.Contains(string(out), "10.0.2.50/24") || !strings.Contains(string(out), "name: kairos") {
 			t.Errorf("out %q, err %v", out, err)
 		}
+		want := Carried{
+			Files:     []string{"/etc/systemd/network/10-btk-525400123456.network"},
+			Addresses: []string{"lan0 10.0.2.50/24"},
+			Routes:    []string{"lan0 default via 10.0.2.2", "lan0 198.51.100.0/24"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("carried = %+v, want %+v", got, want)
+		}
 	})
 	t.Run("capture fails", func(t *testing.T) {
-		if _, err := Carry([]byte(plain), func() (*Host, error) { return nil, errBoom }, quiet); !errors.Is(err, errBoom) ||
+		if _, _, err := Carry([]byte(plain), func() (*Host, error) { return nil, errBoom }, quiet); !errors.Is(err, errBoom) ||
 			!strings.Contains(err.Error(), "--keep-network=false") {
 			t.Errorf("err = %v", err)
 		}
