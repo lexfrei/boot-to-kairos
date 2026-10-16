@@ -14,6 +14,7 @@ This is early work, tested on one setup only (see below). It erases the target d
 6. It flushes the filesystems on other disks, each on its own so the old ones on the target disk stay untouched.
 7. It writes a UEFI boot entry for Kairos, puts it in the boot order where the old system stood (see below), and reboots into Kairos.
 
+It reboots through the firmware, not with kexec into the new kernel, on purpose: that first boot proves the firmware boots the disk the same way every later boot will, from the boot entry it wrote or, without one, from its fallback to `\EFI\BOOT`. The price is one POST.
 
 ## UEFI boot entry
 
