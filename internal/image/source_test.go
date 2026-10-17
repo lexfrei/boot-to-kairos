@@ -642,3 +642,34 @@ func TestOpenCountsAManifestReachedTwiceOnce(t *testing.T) {
 		t.Fatalf("one manifest, named directly and through an index: %v", err)
 	}
 }
+
+// fetchVerified computes only sha256 and relies on ggcr refusing a digest
+// that names another algorithm when it parses one.
+func TestOpenRefusesADigestThatIsNotSHA256(t *testing.T) {
+	img, dir := twoLayers(t)
+	h, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(blobPath(dir, h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha512"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "blobs", "sha512", h.Hex), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx = bytes.ReplaceAll(idx, []byte(h.String()), []byte("sha512:"+h.Hex))
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), idx, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); err == nil || !strings.Contains(err.Error(), "unsupported hash") {
+		t.Fatalf("err = %v, want the sha512 digest refused", err)
+	}
+}
