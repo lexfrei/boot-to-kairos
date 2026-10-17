@@ -521,7 +521,7 @@ func (l layoutSource) root(context.Context) ([]byte, types.MediaType, v1.Hash, b
 			return nil, "", v1.Hash{}, false, errors.Wrap(ErrLegacyDockerArchive,
 				"save it with Docker 25 or later, or convert it with skopeo copy docker-archive:FILE oci-archive:FILE")
 		}
-		return nil, "", v1.Hash{}, false, errors.New("no index.json: not an OCI image layout")
+		return nil, "", v1.Hash{}, false, errors.New("no index.json at the root of the archive or directory: not an OCI image layout")
 	}
 	if err != nil {
 		return nil, "", v1.Hash{}, false, err
@@ -538,7 +538,11 @@ func (l layoutSource) root(context.Context) ([]byte, types.MediaType, v1.Hash, b
 }
 
 func (l layoutSource) open(_ context.Context, d *v1.Descriptor) (io.ReadCloser, error) {
-	return l.file(path.Join("blobs", d.Digest.Algorithm, d.Digest.Hex))
+	rc, err := l.file(path.Join("blobs", d.Digest.Algorithm, d.Digest.Hex))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, errors.Wrap(err, "the layout lacks this blob; it must hold its own blobs, not use a shared blob directory")
+	}
+	return rc, err
 }
 
 func (layoutSource) transient(error) bool { return false }

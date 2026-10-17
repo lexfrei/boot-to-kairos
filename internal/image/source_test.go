@@ -689,3 +689,23 @@ func TestApplyingALayerStopsWhenCancelled(t *testing.T) {
 	}
 	assertEmpty(t, dest)
 }
+
+// skopeo's --dest-shared-blob-dir keeps blobs outside the layout, and a
+// tar of the layout's parent puts index.json one level down.
+func TestALayoutThatIsNotSelfContainedSaysWhatIsMissing(t *testing.T) {
+	img, dir := twoLayers(t)
+	if _, err := Open(t.Context(), "oci-archive:"+tarDir(t, dir, "image/"), "linux/"+runtime.GOARCH, false); err == nil || !strings.Contains(err.Error(), "at the root of the archive or directory") {
+		t.Fatalf("err = %v, want a hint that index.json must be at the root", err)
+	}
+	if err := os.Remove(blobPath(dir, layerDigests(t, img)[1])); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = got.Extract(t.Context(), t.TempDir(), t.TempDir(), func(int64) error { return nil })
+	if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "must hold its own blobs") {
+		t.Fatalf("err = %v, want a hint that the layout must hold its blobs", err)
+	}
+}
