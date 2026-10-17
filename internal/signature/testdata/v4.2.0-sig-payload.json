@@ -1,0 +1,1 @@
+{"critical":{"identity":{"docker-reference":"quay.io/kairos/hadron"},"image":{"docker-manifest-digest":"sha256:ca75eb00118696ead63c689f92138da23c7231eb63c2903d7a7e7375ff5f7e83"},"type":"cosign container image signature"},"optional":null}
