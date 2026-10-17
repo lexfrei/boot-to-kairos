@@ -24,6 +24,7 @@ import (
 
 	"github.com/lexfrei/boot-to-kairos/internal/efiboot"
 	"github.com/lexfrei/boot-to-kairos/internal/flash"
+	"github.com/lexfrei/boot-to-kairos/internal/identity"
 	"github.com/lexfrei/boot-to-kairos/internal/image"
 	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 	"github.com/lexfrei/boot-to-kairos/internal/loop"
@@ -41,6 +42,9 @@ type Options struct {
 	Yes        bool
 	// KeepNetwork carries the host's network configuration over.
 	KeepNetwork bool
+	// KeepIdentity carries the host's SSH logins, SSH host keys and
+	// hostname over, and makes ConfigPath optional.
+	KeepIdentity bool
 	// DryRun stops before the point of no return and prints the plan.
 	DryRun bool
 	// InsecureRegistry allows plain http to a registry on another machine.
@@ -86,7 +90,7 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 		return nil, ErrMissingImage
 	case o.Disk == "":
 		return nil, ErrMissingDisk
-	case o.ConfigPath == "":
+	case o.ConfigPath == "" && !o.KeepIdentity:
 		return nil, ErrMissingConfig
 	case o.Output != "" && o.Output != OutputText && o.Output != OutputJSON:
 		return nil, errors.Wrapf(ErrBadOutput, "not %q", o.Output)
@@ -107,9 +111,11 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 		return nil, errors.Wrapf(ErrNotWholeDisk, "%s is a virtual block device", o.Disk)
 	}
 	o.Disk = "/dev/" + filepath.Base(dev)
-	cfg, err := os.ReadFile(o.ConfigPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "read --cloud-config")
+	cfg := []byte("#cloud-config\n")
+	if o.ConfigPath != "" {
+		if cfg, err = os.ReadFile(o.ConfigPath); err != nil {
+			return nil, errors.Wrap(err, "read --cloud-config")
+		}
 	}
 	if err := kairos.CheckConfig(cfg); err != nil {
 		return nil, errors.Wrap(ErrBadConfig, err.Error())
@@ -229,6 +235,10 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		}
 		plan.addNetwork(&carried)
 	}
+	cfg, err := carryIdentity(ctx, o, cfg, plan)
+	if err != nil {
+		return err
+	}
 	if !o.Yes && !o.DryRun {
 		prompt := out
 		if o.Output == OutputJSON {
@@ -303,6 +313,39 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 	}
 	log.Print("rebooting")
 	return errors.Wrap(reboot(), "reboot")
+}
+
+// carryIdentity adds the host's identity to cfg. Without a cloud-config of
+// the user's own, what it carries is the only way into the new system.
+func carryIdentity(ctx context.Context, o Options, cfg []byte, plan *Plan) ([]byte, error) {
+	if !o.KeepIdentity {
+		plan.Add("identity", "not carried (--keep-identity=false)")
+		return cfg, nil
+	}
+	cfg, carried, err := identity.Carry(cfg, func() (*identity.Host, error) { return captureIdentity(ctx) }, log.Printf)
+	if err != nil {
+		return nil, err
+	}
+	plan.addIdentity(&carried)
+	if o.ConfigPath == "" && !carried.Login {
+		return nil, errors.Newf("%w: nothing carried over lets an admin user log in with an SSH key; "+
+			"pass a --cloud-config that gives you one", identity.ErrNoLogin)
+	}
+	return cfg, nil
+}
+
+// checkClashes refuses the build when a carried user has the name of an
+// account of the unpacked image.
+func checkClashes(cfg []byte, root string) error {
+	names, err := identity.Clashes(cfg, root)
+	if err != nil {
+		return err
+	}
+	if len(names) > 0 {
+		return errors.Newf("%w: %s; give it another name on this system or in the cloud-config, or pass --keep-identity=false",
+			identity.ErrAccountClash, strings.Join(names, ", "))
+	}
+	return nil
 }
 
 const efivars = "/sys/firmware/efi/efivars"
@@ -380,6 +423,7 @@ var (
 	quiesceDisk          = quiesce.Disk
 	planStop             = quiesce.Plan
 	captureNetwork       = netcfg.Capture
+	captureIdentity      = identity.CaptureHost
 	lockCheck            = checkLock
 	writeImage           = flash.WriteVerified
 	syncOthers           = quiesce.SyncOthers
@@ -561,6 +605,9 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	if err := unpack(ctx, o, root, budget, plan); err != nil {
 		return "", err
 	}
+	if err := checkClashes(cfg, root); err != nil {
+		return "", err
+	}
 	var st unix.Statfs_t
 	if err := unix.Statfs(root, &st); err != nil {
 		return "", errors.Wrap(err, "statfs rootfs")
@@ -662,8 +709,12 @@ func install(ctx context.Context, root, device string, cfg []byte) error {
 }
 
 func confirm(ctx context.Context, in io.Reader, out io.Writer, o Options) error {
+	cfg := o.ConfigPath
+	if cfg == "" {
+		cfg = "none"
+	}
 	fmt.Fprintf(out, "\nImage:        %s\nTarget disk:  %s (ALL DATA WILL BE ERASED)\nCloud-config: %s\n\nType the disk path to continue: ",
-		o.Image, o.Disk, o.ConfigPath)
+		o.Image, o.Disk, cfg)
 	// The read cannot be interrupted, so Ctrl-C is waited for beside it.
 	answer := make(chan string, 1)
 	go func() {
@@ -866,6 +917,24 @@ func (p *Plan) addNetwork(c *netcfg.Carried) {
 	p.AddList("network routes", c.Routes)
 }
 
+func (p *Plan) addIdentity(c *identity.Carried) {
+	if c.Hostname != "" {
+		p.Add("hostname", c.Hostname)
+	} else {
+		p.Add("hostname", "not carried: "+c.HostnameReason)
+	}
+	if len(c.HostKeys) > 0 {
+		p.AddList("SSH host keys", c.HostKeys)
+	} else {
+		p.Add("SSH host keys", "not carried: "+c.HostKeysReason)
+	}
+	p.AddList("SSH users", c.Users)
+	if c.RootTo != "" {
+		p.Add("root's SSH keys", c.RootTo)
+	}
+	p.AddList("identity not carried", c.Dropped)
+}
+
 // Print writes one indented line per item, the values aligned.
 func (p *Plan) Print(w io.Writer) {
 	width := 0
@@ -967,6 +1036,8 @@ var errorClasses = []struct {
 	{ErrAlreadyRunning, "already-running"},
 	{quiesce.ErrUnplaceable, "disk-in-use"},
 	{netcfg.ErrUnsupported, "network-unsupported"},
+	{identity.ErrNoLogin, "no-login"},
+	{identity.ErrAccountClash, "account-clash"},
 	{context.Canceled, "interrupted"},
 	{image.ErrPlatform, "bad-image"},
 	{image.ErrMismatch, "bad-image"},

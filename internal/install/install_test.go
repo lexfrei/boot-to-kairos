@@ -82,6 +82,7 @@ func TestValidate(t *testing.T) {
 		{name: "no image", mod: func(o *Options) { o.Image = "" }, uefi: true, want: ErrMissingImage},
 		{name: "no disk", mod: func(o *Options) { o.Disk = "" }, uefi: true, want: ErrMissingDisk},
 		{name: "no config", mod: func(o *Options) { o.ConfigPath = "" }, uefi: true, want: ErrMissingConfig},
+		{name: "no config, identity carried", mod: func(o *Options) { o.ConfigPath, o.KeepIdentity = "", true }, uefi: true, want: nil},
 		{name: "partition", mod: func(o *Options) { o.Disk = "/dev/vda1" }, uefi: true, want: ErrNotWholeDisk},
 		{name: "unknown disk", mod: func(o *Options) { o.Disk = "/dev/sdz" }, uefi: true, want: ErrNotWholeDisk},
 		{name: "regular file", mod: func(o *Options) { o.Disk = "/tmp/vda" }, uefi: true, want: ErrNotWholeDisk},
@@ -210,6 +211,13 @@ func TestValidateReturnsConfigContent(t *testing.T) {
 	}
 	if string(cfg) != body {
 		t.Fatalf("config = %q", cfg)
+	}
+}
+
+func TestValidateWithoutConfigStartsFromAnEmptyOne(t *testing.T) {
+	cfg, err := Validate(&Options{Image: "x", Disk: "/dev/vda", KeepIdentity: true}, fakeSys(t, true), fakeDevOf)
+	if err != nil || string(cfg) != "#cloud-config\n" {
+		t.Fatalf("config = %q, %v", cfg, err)
 	}
 }
 
