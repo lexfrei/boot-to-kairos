@@ -76,6 +76,9 @@ type source interface {
 	// list several images and has no digest.
 	root(ctx context.Context) (raw []byte, mt types.MediaType, d v1.Hash, layout bool, err error)
 	open(ctx context.Context, d *v1.Descriptor) (io.ReadCloser, error)
+	// signatures says where to look up the signatures of the image whose
+	// signable digests, see Image.signed, are signed.
+	signatures(ctx context.Context, signed []v1.Hash) (SignatureSource, error)
 	// transient says whether fetching again may give another result.
 	transient(err error) bool
 	transport() string
@@ -97,12 +100,12 @@ func Open(ctx context.Context, ref, platform string, insecure bool) (*Image, err
 	if err != nil {
 		return nil, err
 	}
-	digest, m, err := resolveManifest(ctx, src, want)
+	r, err := resolveManifest(ctx, src, want)
 	if err != nil {
 		_ = src.close()
 		return nil, errors.Wrapf(err, "resolve %s", ref)
 	}
-	return &Image{Digest: digest, Layers: m.Layers, src: src}, nil
+	return &Image{Digest: r.digest, Layers: r.m.Layers, signed: r.tops, src: src}, nil
 }
 
 func openSource(ref string, insecure bool) (source, error) {
@@ -135,11 +138,13 @@ func openSource(ref string, insecure bool) (source, error) {
 }
 
 // resolveManifest walks from the source's root down to the image manifest
-// for want, whose config must name want's platform too.
-func resolveManifest(ctx context.Context, src source, want *v1.Platform) (v1.Hash, *v1.Manifest, error) {
+// for want, whose config must name want's platform too. Its tops are the
+// root's digest, or for a layout each entry of index.json that resolves to
+// that manifest.
+func resolveManifest(ctx context.Context, src source, want *v1.Platform) (resolved, error) {
 	raw, mt, digest, anchor, err := src.root(ctx)
 	if err != nil {
-		return v1.Hash{}, nil, err
+		return resolved{}, err
 	}
 	if !anchor && !mt.IsIndex() && !mt.IsImage() {
 		// A registry may serve a manifest under a generic content type.
@@ -147,9 +152,12 @@ func resolveManifest(ctx context.Context, src source, want *v1.Platform) (v1.Has
 	}
 	r, err := resolveNode(ctx, src, node{raw: raw, mt: mt, digest: digest}, want, anchor, 0)
 	if err != nil {
-		return v1.Hash{}, nil, err
+		return resolved{}, err
 	}
-	return r.digest, r.m, nil
+	if !anchor {
+		r.tops = []v1.Hash{digest}
+	}
+	return r, nil
 }
 
 type node struct {
@@ -161,6 +169,7 @@ type node struct {
 type resolved struct {
 	digest v1.Hash
 	m      *v1.Manifest
+	tops   []v1.Hash
 }
 
 func resolveNode(ctx context.Context, src source, n node, want *v1.Platform, anchor bool, depth int) (resolved, error) {
@@ -172,7 +181,7 @@ func resolveNode(ctx context.Context, src source, n node, want *v1.Platform, anc
 		if err != nil {
 			return resolved{}, errors.Wrap(err, "parse manifest")
 		}
-		return resolved{n.digest, m}, checkConfig(ctx, src, &m.Config, want)
+		return resolved{digest: n.digest, m: m}, checkConfig(ctx, src, &m.Config, want)
 	}
 	if !n.mt.IsIndex() && !anchor {
 		return resolved{}, errors.Newf("unsupported media type %q", n.mt)
@@ -218,9 +227,11 @@ func pick(ctx context.Context, src source, idx *v1.IndexManifest, want *v1.Platf
 		if !anchor {
 			return r, nil
 		}
-		if slices.ContainsFunc(found, func(f resolved) bool { return f.digest == r.digest }) {
+		if at := slices.IndexFunc(found, func(f resolved) bool { return f.digest == r.digest }); at >= 0 {
+			found[at].tops = append(found[at].tops, d.Digest)
 			continue
 		}
+		r.tops = []v1.Hash{d.Digest}
 		found = append(found, r)
 		names = append(names, d.Annotations["org.opencontainers.image.ref.name"]+"@"+d.Digest.String())
 	}
