@@ -105,6 +105,8 @@ func TestARefusalIsReportedWithItsClass(t *testing.T) {
 		{targetsRefusal(t, "#cloud-config\n- install\n"), "bad-config"},
 		{targetsRefusal(t, "#cloud-config\ninstall: {partitions: [oem]}\n"), "bad-config"},
 		{targetsRefusal(t, "#cloud-config\ninstall: {extra-partitions: {data: {}}}\n"), "bad-config"},
+		{networkRefusal(t, "#cloud-config\nstages: [a]\n"), "bad-config"},
+		{networkRefusal(t, "#cloud-config\ninstall: 5\n"), "bad-config"},
 		{ErrBIOSUnsupported, "bios-unsupported"},
 		{ErrLabelClash, "label-clash"},
 		{ErrAborted, "aborted"},
@@ -217,6 +219,19 @@ func TestARunThatCannotTakeTheLockIsReported(t *testing.T) {
 	if !errors.Is(err, ErrAlreadyRunning) || ran || r.Refusal == nil || r.Refusal.Class != "already-running" {
 		t.Fatalf("err = %v, ran %v, report %+v: want an already-running refusal on stdout", err, ran, r)
 	}
+}
+
+// networkRefusal returns netcfg's refusal of a cfg that Targets accepts.
+func networkRefusal(t *testing.T, cfg string) error {
+	t.Helper()
+	if _, _, err := kairos.Targets([]byte(cfg)); err != nil {
+		t.Fatalf("Targets refused %q first: %v", cfg, err)
+	}
+	_, err := netcfg.UserConfigures([]byte(cfg))
+	if err == nil {
+		t.Fatalf("%q was not refused", cfg)
+	}
+	return err
 }
 
 func targetsRefusal(t *testing.T, cfg string) error {

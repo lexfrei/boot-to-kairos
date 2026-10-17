@@ -9,6 +9,8 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 )
 
 // stages are where the carried files are written, as Kairos writes its own
@@ -143,7 +145,7 @@ func UserConfigures(cfg []byte) (string, error) {
 		} `yaml:"install"`
 	}
 	if err := yaml.Unmarshal(cfg, &c); err != nil {
-		return "", errors.Wrap(err, "parse cloud-config")
+		return "", errors.Mark(errors.Wrap(err, "parse cloud-config"), kairos.ErrBadConfig)
 	}
 	for name, entries := range c.Stages {
 		for i := range entries {
