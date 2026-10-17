@@ -16,6 +16,7 @@ import (
 
 	cerrors "github.com/cockroachdb/errors"
 	"github.com/lexfrei/boot-to-kairos/internal/kairos"
+	"github.com/lexfrei/boot-to-kairos/internal/signature"
 )
 
 // fakeSys builds just enough of /sys for disk and firmware checks.
@@ -92,6 +93,23 @@ func TestValidate(t *testing.T) {
 		{name: "bios", mod: func(*Options) {}, uefi: false, want: nil},
 		{name: "json output", mod: func(o *Options) { o.Output = OutputJSON }, uefi: true, want: nil},
 		{name: "unknown output", mod: func(o *Options) { o.Output = "yaml" }, uefi: true, want: ErrBadOutput},
+		{name: "own signer", mod: func(o *Options) {
+			o.Signature = &SignatureOptions{Signer: signature.Policy{Identity: "^https://github\\.com/example/", Issuer: "https://example.com"}}
+		}, uefi: true, want: nil},
+		{name: "identity without issuer", mod: func(o *Options) {
+			o.Signature = &SignatureOptions{Signer: signature.Policy{Identity: "^https://github\\.com/example/"}}
+		}, uefi: true, want: ErrSignatureFlags},
+		{name: "issuer without identity", mod: func(o *Options) {
+			o.Signature = &SignatureOptions{Signer: signature.Policy{Issuer: "https://example.com"}}
+		}, uefi: true, want: ErrSignatureFlags},
+		{name: "identity not a regexp", mod: func(o *Options) {
+			o.Signature = &SignatureOptions{Signer: signature.Policy{Identity: "(", Issuer: "https://example.com"}}
+		}, uefi: true, want: ErrSignatureFlags},
+		{name: "signer with verification off", mod: func(o *Options) {
+			o.Signature, o.SkipSignature = &SignatureOptions{Signer: signature.Policy{Identity: "^https://github\\.com/example/", Issuer: "https://example.com"}}, true
+		}, uefi: true, want: ErrSignatureFlags},
+		{name: "trusted root alone", mod: func(o *Options) { o.Signature = &SignatureOptions{TrustedRoot: "/root.json"} }, uefi: true, want: nil},
+		{name: "trusted root with verification off", mod: func(o *Options) { o.Signature, o.SkipSignature = &SignatureOptions{TrustedRoot: "/root.json"}, true }, uefi: true, want: ErrSignatureFlags},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

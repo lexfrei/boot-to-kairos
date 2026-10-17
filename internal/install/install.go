@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/lexfrei/boot-to-kairos/internal/quiesce"
 	"github.com/lexfrei/boot-to-kairos/internal/sandbox"
 	"github.com/lexfrei/boot-to-kairos/internal/secureboot"
+	"github.com/lexfrei/boot-to-kairos/internal/signature"
 )
 
 // Options are the user's choices.
@@ -50,6 +52,10 @@ type Options struct {
 	DryRun bool
 	// InsecureRegistry allows plain http to a registry on another machine.
 	InsecureRegistry bool
+	// SkipSignature installs the image without verifying its signature.
+	SkipSignature bool
+	// Signature, if set, changes how the signature is verified.
+	Signature *SignatureOptions
 	// Output is OutputText or OutputJSON; empty means text.
 	Output string
 	// WorkDir, if set, holds the disk image and the staged layers instead
@@ -75,6 +81,7 @@ var (
 	ErrAborted         = errors.New("aborted by user")
 	ErrBadOutput       = errors.New("--output must be text or json")
 	ErrLabelClash      = errors.New("host partitions carry names kairos-agent uses")
+	ErrSignatureFlags  = errors.New("bad signature flags")
 
 	errNotBlockDevice = errors.New("not a block device")
 )
@@ -101,6 +108,9 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 		return nil, ErrMissingConfig
 	case o.Output != "" && o.Output != OutputText && o.Output != OutputJSON:
 		return nil, errors.Wrapf(ErrBadOutput, "not %q", o.Output)
+	}
+	if err := checkSignatureFlags(o); err != nil {
+		return nil, err
 	}
 	majmin, err := devOf(o.Disk)
 	if err != nil {
@@ -788,6 +798,9 @@ func unpack(ctx context.Context, o Options, root, data string, budget uint64, pl
 		sizes[n] = img.Layers[n].Size
 	}
 	plan.addImage(img.Transport(), img.Digest.String(), sizes)
+	if err := checkSignature(ctx, o, img, plan); err != nil {
+		return err
+	}
 	fits := layersFit
 	if o.work != nil {
 		fits = unpackedFit
@@ -1134,6 +1147,7 @@ var errorClasses = []struct {
 	{ErrMissingDisk, "usage"},
 	{ErrMissingConfig, "usage"},
 	{ErrBadOutput, "usage"},
+	{ErrSignatureFlags, "usage"},
 	{ErrNotWholeDisk, "not-whole-disk"},
 	{ErrBadConfig, "bad-config"},
 	{kairos.ErrUncheckable, "bad-config"},
@@ -1150,6 +1164,8 @@ var errorClasses = []struct {
 	{identity.ErrNoLogin, "no-login"},
 	{identity.ErrAccountClash, "account-clash"},
 	{context.Canceled, "interrupted"},
+	{signature.ErrNoSignature, "no-signature"},
+	{signature.ErrBadSignature, "bad-signature"},
 	{image.ErrPlatform, "bad-image"},
 	{image.ErrMismatch, "bad-image"},
 	{image.ErrAmbiguous, "bad-image"},
@@ -1164,4 +1180,72 @@ func errorClass(err error) string {
 		}
 	}
 	return "error"
+}
+
+// SignatureOptions are the signature flags other than skipping the check.
+type SignatureOptions struct {
+	// Signer is the signer to accept; the zero Policy is Kairos's release
+	// pipeline.
+	Signer signature.Policy
+	// TrustedRoot is a Sigstore trusted_root.json to verify against
+	// instead of the one fetched from Sigstore's TUF repository.
+	TrustedRoot string
+}
+
+// signed is the part of image.Image a signature is looked up through.
+type signed interface {
+	Signatures(ctx context.Context) (image.SignatureSource, error)
+	Retry(ctx context.Context, what string, fetch func(ctx context.Context) error, final ...error) error
+}
+
+// checkSignature verifies the image's signature, unless o skips it, and
+// names the outcome in the plan.
+func checkSignature(ctx context.Context, o Options, img signed, plan *Plan) error {
+	if o.SkipSignature {
+		log.Print("the image signature is not verified: --verify-signature=false")
+		plan.Add("signature", "not verified: --verify-signature=false")
+		return nil
+	}
+	var so SignatureOptions
+	if o.Signature != nil {
+		so = *o.Signature
+	}
+	tm, err := signature.Trusted(ctx, so.TrustedRoot)
+	if err != nil {
+		return err
+	}
+	p := so.Signer
+	var res signature.Result
+	err = img.Retry(ctx, "the image signature", func(ctx context.Context) error {
+		src, err := img.Signatures(ctx)
+		if err != nil {
+			return err
+		}
+		res, err = signature.Verify(ctx, src, p, tm)
+		return err
+	}, signature.ErrNoSignature, signature.ErrBadSignature)
+	if errors.IsAny(err, signature.ErrNoSignature, signature.ErrBadSignature) {
+		return fmt.Errorf("%w; --verify-signature=false installs it anyway", err)
+	}
+	if err != nil {
+		return err
+	}
+	log.Printf("signature verified: %s", res)
+	plan.Add("signature", "verified: "+res.String())
+	return nil
+}
+
+func checkSignatureFlags(o *Options) error {
+	switch {
+	case o.SkipSignature && o.Signature != nil:
+		return errors.Wrap(ErrSignatureFlags, "--signature-identity, --signature-issuer and --trusted-root have no use with --verify-signature=false")
+	case o.Signature == nil:
+		return nil
+	case (o.Signature.Signer.Identity == "") != (o.Signature.Signer.Issuer == ""):
+		return errors.Wrap(ErrSignatureFlags, "--signature-identity and --signature-issuer go together")
+	}
+	if _, err := regexp.Compile(o.Signature.Signer.Identity); err != nil {
+		return errors.Wrapf(ErrSignatureFlags, "--signature-identity: %v", err)
+	}
+	return nil
 }
