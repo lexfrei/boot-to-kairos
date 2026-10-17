@@ -225,17 +225,7 @@ func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
 // does not ask, as it leaves the disk alone, and stops before the point of
 // no return. frozen is set once the disk may be quiesced.
 func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reader, out io.Writer, frozen *bool) error {
-	if !o.KeepNetwork {
-		plan.Add("network", "not carried (--keep-network=false)")
-	} else {
-		var carried netcfg.Carried
-		var err error
-		if cfg, carried, err = netcfg.Carry(cfg, captureNetwork, log.Printf); err != nil {
-			return err
-		}
-		plan.addNetwork(&carried)
-	}
-	cfg, err := carryIdentity(ctx, o, cfg, plan)
+	cfg, err := extend(ctx, o, cfg, plan)
 	if err != nil {
 		return err
 	}
@@ -313,6 +303,30 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 	}
 	log.Print("rebooting")
 	return errors.Wrap(reboot(), "reboot")
+}
+
+// extend adds what the install carries over to the user's cloud-config.
+func extend(ctx context.Context, o Options, cfg []byte, plan *Plan) ([]byte, error) {
+	if !o.KeepNetwork {
+		plan.Add("network", "not carried (--keep-network=false)")
+	} else {
+		var carried netcfg.Carried
+		var err error
+		if cfg, carried, err = netcfg.Carry(cfg, captureNetwork, log.Printf); err != nil {
+			return nil, err
+		}
+		plan.addNetwork(&carried)
+	}
+	cfg, err := carryIdentity(ctx, o, cfg, plan)
+	if err != nil {
+		return nil, err
+	}
+	cfg, why, err := blockDatasources(cfg)
+	if err != nil {
+		return nil, err
+	}
+	plan.addDatasources(why)
+	return cfg, nil
 }
 
 // carryIdentity adds the host's identity to cfg. Without a cloud-config of

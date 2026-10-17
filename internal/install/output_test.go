@@ -68,16 +68,16 @@ func TestDryRunPrintsOneJSONObject(t *testing.T) {
 	for _, it := range r.Plan {
 		names = append(names, it.Name)
 	}
-	if want := "image,network,identity,image.raw,boot entry,swap to turn off,filesystems to stop"; strings.Join(names, ",") != want {
+	if want := "image,network,identity,cloud datasources,image.raw,boot entry,swap to turn off,filesystems to stop"; strings.Join(names, ",") != want {
 		t.Fatalf("plan items = %v, want %s in that order", names, want)
 	}
 	if it := r.Plan[0]; it.Value == nil || *it.Value != "quay.io/kairos/hadron:example" || it.Values != nil {
 		t.Errorf("image item = %+v, want a single value", it)
 	}
-	if it := r.Plan[5]; it.Values == nil || len(*it.Values) != 1 || (*it.Values)[0] != "/swap.img" || it.Value != nil {
+	if it := r.Plan[6]; it.Values == nil || len(*it.Values) != 1 || (*it.Values)[0] != "/swap.img" || it.Value != nil {
 		t.Errorf("swap item = %+v, want a list", it)
 	}
-	if it := r.Plan[6]; it.Values == nil || strings.Join(*it.Values, "|") != "/|/boot/efi" {
+	if it := r.Plan[7]; it.Values == nil || strings.Join(*it.Values, "|") != "/|/boot/efi" {
 		t.Errorf("filesystems item = %+v", it)
 	}
 }

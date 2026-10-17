@@ -152,7 +152,7 @@ func TestDryRunSaysWhenTheIdentityIsNotCarried(t *testing.T) {
 	if re := `(?m)^  identity: +not carried \(--keep-identity=false\)$`; !regexp.MustCompile(re).MatchString(out.String()) {
 		t.Errorf("summary does not match %s:\n%s", re, out.String())
 	}
-	if slices.Contains(*calls, "capture identity") || string(builtConfig) != plainConfig {
+	if slices.Contains(*calls, "capture identity") || strings.Contains(string(builtConfig), "carried over from the replaced system") {
 		t.Errorf("calls %v, config %q: nothing may be carried", *calls, builtConfig)
 	}
 }
