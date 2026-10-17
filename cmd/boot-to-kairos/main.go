@@ -34,6 +34,7 @@ func main() {
 	flag.BoolVar(&o.KeepIdentity, "keep-identity", true, "carry this system's SSH users and their keys, SSH host keys and hostname into the installed one, where the cloud-config does not set them")
 	flag.StringVar(&o.Output, "output", install.OutputText, "text, or json for one JSON object on stdout with the plan and the refusal, if any")
 	flag.BoolVar(&o.DryRun, "dry-run", false, "check and build everything, then stop before the point of no return and print the plan; the disk is left alone")
+	flag.StringVar(&o.WorkDir, "workdir", "", "existing directory on another disk to build the disk image in instead of RAM; only the unpacked image stays in a tmpfs")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 

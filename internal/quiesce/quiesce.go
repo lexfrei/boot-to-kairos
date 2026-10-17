@@ -93,8 +93,8 @@ func mountedOver(mounts []mount, m mount) bool {
 }
 
 type mount struct {
-	id, point, dev, fstype string
-	onDisk, superRO        bool
+	id, point, dev, fstype, source string
+	onDisk, superRO                bool
 }
 
 // readMounts returns every mount in mountinfo order.
@@ -119,7 +119,7 @@ func readMounts(mountinfo io.Reader, sysfs, disk string, devOf func(string) (str
 			placed[majmin] = on
 		}
 		superRO := sep+3 < len(f) && slices.Contains(strings.Split(f[sep+3], ","), "ro")
-		out = append(out, mount{id: f[0], point: mnt, dev: majmin, fstype: fstype, onDisk: on, superRO: superRO})
+		out = append(out, mount{id: f[0], point: mnt, dev: majmin, fstype: fstype, source: source, onDisk: on, superRO: superRO})
 	}
 	return out, errors.Wrap(sc.Err(), "read mountinfo")
 }
