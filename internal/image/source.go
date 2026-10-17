@@ -340,14 +340,19 @@ func fetchVerified(ctx context.Context, src source, d *v1.Descriptor, w io.Write
 }
 
 // watchStall runs fetch under a context cancelled with errStalled once
-// stallTimeout passes without the timer being reset. The client reports
-// the cause of a cancelled request, so the error names the stall.
+// stallTimeout passes without the timer being reset.
 func watchStall(ctx context.Context, fetch func(context.Context, *time.Timer) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	stall := time.AfterFunc(stallTimeout, func() { cancel(errStalled) })
 	defer stall.Stop()
-	return fetch(ctx, stall)
+	err := fetch(ctx, stall)
+	// Over HTTP/2 the client returns context.Canceled rather than the cause,
+	// which would be taken for an interrupted install.
+	if errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), errStalled) {
+		return errors.Wrap(errStalled, err.Error())
+	}
+	return err
 }
 
 // stallReader restarts the stall timer whenever data arrives.

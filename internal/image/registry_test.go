@@ -585,3 +585,45 @@ func TestPullRetriesAPrivateRegistryOverHTTPS(t *testing.T) {
 		t.Fatalf("log %q, want the first attempt to fail on both pings over https and be retried", logged.String())
 	}
 }
+
+// Over HTTP/2 the client reports a cancelled request as context.Canceled,
+// not its cause, which would read as an interrupted install.
+func TestAStallOverHTTP2IsReportedAsAStall(t *testing.T) {
+	savedDelay, savedTransport, savedStall := retryDelay, registryTransport, stallTimeout
+	t.Cleanup(func() { retryDelay, registryTransport, stallTimeout = savedDelay, savedTransport, savedStall })
+	retryDelay, stallTimeout = 0, 300*time.Millisecond
+	img, _ := twoLayers(t)
+	inner := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+	plain := httptest.NewServer(inner)
+	t.Cleanup(plain.Close)
+	r, err := name.ParseReference(strings.TrimPrefix(plain.URL, "http://") + "/kairos/hadron:" + tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(r, img); err != nil {
+		t.Fatal(err)
+	}
+	blob := blobPathSuffix(layerDigests(t, img)[1])
+	var h2 atomic.Bool
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, blob) {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		h2.Store(r.ProtoMajor == 2)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	registryTransport = srv.Client().Transport
+	_, err = pullAndExtract(t, t.Context(), strings.TrimPrefix(srv.URL, "https://")+"/kairos/hadron:"+tag)
+	if !h2.Load() {
+		t.Fatal("the layer was not fetched over HTTP/2")
+	}
+	if !errors.Is(err, errStalled) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a stall, not a cancellation", err)
+	}
+}
