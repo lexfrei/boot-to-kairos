@@ -968,6 +968,11 @@ var errorClasses = []struct {
 	{quiesce.ErrUnplaceable, "disk-in-use"},
 	{netcfg.ErrUnsupported, "network-unsupported"},
 	{context.Canceled, "interrupted"},
+	{image.ErrPlatform, "bad-image"},
+	{image.ErrMismatch, "bad-image"},
+	{image.ErrAmbiguous, "bad-image"},
+	{image.ErrLegacyDockerArchive, "bad-image"},
+	{image.ErrInsecureRegistry, "bad-image"},
 }
 
 func errorClass(err error) string {

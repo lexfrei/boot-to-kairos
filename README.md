@@ -89,7 +89,7 @@ With `--output json`, stdout carries a single JSON object and nothing else; logs
 {"dryRun":true,"passed":true,"plan":[{"name":"image","value":"quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0"},{"name":"swap to turn off","values":["/swap.img"]}],"refusal":null}
 ```
 
-`plan` lists the items in the order the text output does; an item has `value`, or `values` when it is a list. `refusal` is `null` when every check passed, and otherwise has the message and a `class`: `usage`, `not-whole-disk`, `bad-config`, `bios-unsupported`, `label-clash`, `aborted`, `not-enough-memory`, `already-running`, `disk-in-use`, `network-unsupported`, `interrupted`, or `error` for anything else.
+`plan` lists the items in the order the text output does; an item has `value`, or `values` when it is a list. `refusal` is `null` when every check passed, and otherwise has the message and a `class`: `usage`, `not-whole-disk`, `bad-config`, `bios-unsupported`, `label-clash`, `aborted`, `not-enough-memory`, `already-running`, `disk-in-use`, `network-unsupported`, `interrupted`, `bad-image` for an image that cannot be used as given (none for this architecture, a digest that does not match, more than one candidate in a layout, a legacy docker save archive, or a registry redirect to plain http), or `error` for anything else.
 
 Errors before the installer itself starts, flags it cannot parse, not running as root and a failure to set up its mount namespace, print no object. Exit status, in either output mode: 0 when a dry run passed; 1 when it refused, or when a real run refused or failed (a real run that succeeds reboots and never exits); 2 for flags it cannot parse; 128 plus the signal number when the installer was killed by a signal.
 
