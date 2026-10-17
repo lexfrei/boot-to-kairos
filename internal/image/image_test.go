@@ -452,3 +452,16 @@ func TestExtractReadsEachLayerToTheEnd(t *testing.T) {
 		t.Fatalf("err = %v, want the checksum failure that comes after the tar end marker", err)
 	}
 }
+
+func TestExtractMarksAFailureToStage(t *testing.T) {
+	img := testImage(t, layer(t, entry{name: "a", typ: tar.TypeReg, body: "a"}))
+	gone := filepath.Join(t.TempDir(), "gone")
+	err := img.Extract(t.Context(), t.TempDir(), gone, func(int64) error { return nil })
+	if !errors.Is(err, ErrStage) {
+		t.Fatalf("Extract = %v, want ErrStage: where a layer could not be staged must be told from where it could not be applied", err)
+	}
+	dest := filepath.Join(t.TempDir(), "gone")
+	if err := img.Extract(t.Context(), dest, t.TempDir(), func(int64) error { return nil }); err == nil || errors.Is(err, ErrStage) {
+		t.Fatalf("Extract = %v, want an apply failure that is not ErrStage", err)
+	}
+}

@@ -115,6 +115,8 @@ func TestARefusalIsReportedWithItsClass(t *testing.T) {
 		{ErrLabelClash, "label-clash"},
 		{ErrAborted, "aborted"},
 		{cerrors.Wrap(ErrNotEnoughMemory, "100 MiB"), "not-enough-memory"},
+		{cerrors.Wrap(ErrNotEnoughSpace, "the disk image"), "not-enough-space"},
+		{cerrors.Wrap(ErrBadWorkDir, "it is on vda"), "bad-workdir"},
 		{cerrors.Wrap(ErrAlreadyRunning, "held"), "already-running"},
 		{cerrors.Wrap(quiesce.ErrUnplaceable, "zfs"), "disk-in-use"},
 		{cerrors.Wrap(netcfg.ErrUnsupported, "team0"), "network-unsupported"},

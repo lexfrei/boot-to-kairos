@@ -5,6 +5,7 @@ package image
 import (
 	"archive/tar"
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -44,7 +45,7 @@ func (i *Image) Extract(ctx context.Context, dest, stage string, fits func(size 
 		}
 		blob, err := stageBlob(ctx, i.src, l, stage)
 		if err != nil {
-			return errors.Wrapf(err, "layer %d", n)
+			return errors.Wrapf(fmt.Errorf("%w: %w", ErrStage, err), "layer %d", n)
 		}
 		err = applyLayer(ctx, dest, blob, l)
 		_ = os.Remove(blob)
@@ -54,6 +55,9 @@ func (i *Image) Extract(ctx context.Context, dest, stage string, fits func(size 
 	}
 	return nil
 }
+
+// ErrStage marks a failure to copy a layer to the staging dir.
+var ErrStage = errors.New("staging")
 
 // Transport names where the image is read from.
 func (i *Image) Transport() string { return i.src.transport() }

@@ -83,6 +83,11 @@ linters:
         - commentedOutCode   # Error code comments are documentation
         - dupBranchBody      # Sometimes intentional for clarity
         - whyNoLint          # Covered by nolintlint
+      settings:
+        hugeParam:
+          # install.Options is passed by value through the steps of a
+          # run, so that what run resolves stays in its own copy.
+          sizeThreshold: 128
       enabled-tags:
         - diagnostic
         - experimental

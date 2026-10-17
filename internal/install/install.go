@@ -51,6 +51,11 @@ type Options struct {
 	InsecureRegistry bool
 	// Output is OutputText or OutputJSON; empty means text.
 	Output string
+	// WorkDir, if set, holds the disk image and the staged layers instead
+	// of the tmpfs.
+	WorkDir string
+
+	work *dataDir
 }
 
 const (
@@ -111,6 +116,11 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 		return nil, errors.Wrapf(ErrNotWholeDisk, "%s is a virtual block device", o.Disk)
 	}
 	o.Disk = "/dev/" + filepath.Base(dev)
+	if o.WorkDir != "" {
+		if o.WorkDir, err = filepath.Abs(o.WorkDir); err != nil {
+			return nil, errors.Wrap(err, "--workdir")
+		}
+	}
 	cfg := []byte("#cloud-config\n")
 	if o.ConfigPath != "" {
 		if cfg, err = os.ReadFile(o.ConfigPath); err != nil {
@@ -217,8 +227,18 @@ func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
 		return errors.Wrapf(ErrLabelClash, "host partitions already carry %s, which kairos-agent finds its own partitions by; "+
 			"it would format or mount those instead. Rename them first", strings.Join(clashes, ", "))
 	}
-	plan.Add("image", o.Image)
-	return proceed(ctx, o, cfg, plan, os.Stdin, os.Stdout, frozen)
+	open := func() (*dataDir, error) {
+		size, err := flash.DeviceSize(o.Disk)
+		if err != nil {
+			return nil, err
+		}
+		return openWorkDir(o.WorkDir, o.Disk, size, workDirUnfit)
+	}
+	return inWorkDir(&o, open, func() error {
+		plan.Add("image", o.Image)
+		addWorkDir(plan, o.work)
+		return proceed(ctx, o, cfg, plan, os.Stdin, os.Stdout, frozen)
+	})
 }
 
 // proceed asks, builds the image and replaces the disk with it. A dry run
@@ -292,11 +312,19 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		}
 		return errors.Wrap(err, "nothing was written; the system was restored")
 	}
+	if err != nil && o.work != nil {
+		o.work.keep = true
+		return errors.Wrapf(err, "the disk image is kept in %s; writing it over %s from rescue media finishes the install",
+			filepath.Join(o.work.shown, "image.raw"), o.Disk)
+	}
 	if err != nil {
 		return err
 	}
 	log.Printf("copied %d MiB, zeroed %d MiB, read-back verified after %d repair rounds; flushing the other disks",
 		st.Copied>>20, st.Zeroed>>20, st.Repairs)
+	if o.work != nil {
+		o.work.remove()
+	}
 	syncOthers(o.Disk, syncTimeout)
 	if entry != nil {
 		applyBootEntry(entry)
@@ -572,9 +600,9 @@ func dropWorkDir() {
 	_ = unix.Unmount(workDir, unix.MNT_DETACH)
 }
 
-// build installs the image onto a sparse file the size of the disk, in RAM,
-// and returns its path. The work tmpfs stays mounted on success because the
-// file is read from it next.
+// build installs the image onto a sparse file the size of the disk, in the
+// work tmpfs or in --workdir, and returns its path. The work tmpfs stays
+// mounted on success because the file may be read from it next.
 func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, error) {
 	size, err := flash.DeviceSize(o.Disk)
 	if err != nil {
@@ -597,7 +625,12 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	if err != nil {
 		return "", err
 	}
-	if err := unix.Mount("tmpfs", workDir, "tmpfs", 0, fmt.Sprintf("mode=0700,size=%d", budget)); err != nil {
+	data, workSize := workDir, budget
+	if o.work != nil {
+		// It holds only the mount point of the rootfs then.
+		data, workSize = o.work.path, 1<<20
+	}
+	if err := unix.Mount("tmpfs", workDir, "tmpfs", 0, fmt.Sprintf("mode=0700,size=%d", workSize)); err != nil {
 		return "", errors.Wrap(err, "mount work tmpfs")
 	}
 	ok := false
@@ -616,7 +649,7 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	if err := unix.Mount("tmpfs", root, "tmpfs", 0, fmt.Sprintf("mode=0755,size=%d", budget)); err != nil {
 		return "", errors.Wrap(err, "mount rootfs tmpfs")
 	}
-	if err := unpack(ctx, o, root, budget, plan); err != nil {
+	if err := unpack(ctx, o, root, data, budget, plan); err != nil {
 		return "", err
 	}
 	if err := checkClashes(cfg, root); err != nil {
@@ -626,18 +659,16 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	if err := unix.Statfs(root, &st); err != nil {
 		return "", errors.Wrap(err, "statfs rootfs")
 	}
-	rootfsSize, workSize, err := splitBudget(budget, (st.Blocks-st.Bfree)*uint64(st.Bsize))
-	if err != nil {
+	rootfsUsed := (st.Blocks - st.Bfree) * uint64(st.Bsize)
+	if o.work != nil {
+		if err := sizeForDisk(root, data, budget, rootfsUsed, size); err != nil {
+			return "", err
+		}
+	} else if err := sizeForTmpfs(root, budget, rootfsUsed); err != nil {
 		return "", err
 	}
-	if err := unix.Mount("", root, "", unix.MS_REMOUNT, fmt.Sprintf("size=%d", rootfsSize)); err != nil {
-		return "", errors.Wrap(err, "shrink rootfs tmpfs")
-	}
-	if err := unix.Mount("", workDir, "", unix.MS_REMOUNT, fmt.Sprintf("mode=0700,size=%d", workSize)); err != nil {
-		return "", errors.Wrap(err, "size work tmpfs")
-	}
 
-	raw := filepath.Join(workDir, "image.raw")
+	raw := filepath.Join(data, "image.raw")
 	f, err := os.Create(raw)
 	if err != nil {
 		return "", errors.Wrap(err, "create image file")
@@ -659,6 +690,9 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 		return "", err
 	}
 	runErr := install(ctx, root, dev.Path, cfg)
+	if o.work != nil {
+		runErr = outOfSpace(runErr, data, lowSpace)
+	}
 	if err := sandbox.Teardown(root); err != nil {
 		return "", err
 	}
@@ -666,6 +700,14 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 		return "", runErr
 	}
 	if err := dev.Detach(); err != nil {
+		return "", err
+	}
+	// On a disk, so that SEEK_DATA tells data from holes on any filesystem
+	// and the write does not wait on writeback.
+	if err := syncFile(raw); err != nil {
+		return "", err
+	}
+	if err := roomLeft(data, lowSpace, o.work != nil); err != nil {
 		return "", err
 	}
 	if err := unix.Unmount(root, unix.MNT_DETACH); err != nil {
@@ -681,9 +723,45 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	return raw, nil
 }
 
-// unpack fetches the image into root, staging each layer on the work
-// tmpfs, outside the image's root.
-func unpack(ctx context.Context, o Options, root string, budget uint64, plan *Plan) error {
+// sizeForTmpfs shrinks the rootfs tmpfs to what it holds and gives the rest
+// of the budget to the work tmpfs, for the disk image.
+func sizeForTmpfs(root string, budget, rootfsUsed uint64) error {
+	rootfsSize, workSize, err := splitBudget(budget, rootfsUsed)
+	if err != nil {
+		return err
+	}
+	if err := unix.Mount("", root, "", unix.MS_REMOUNT, fmt.Sprintf("size=%d", rootfsSize)); err != nil {
+		return errors.Wrap(err, "shrink rootfs tmpfs")
+	}
+	return errors.Wrap(unix.Mount("", workDir, "", unix.MS_REMOUNT, fmt.Sprintf("mode=0700,size=%d", workSize)), "size work tmpfs")
+}
+
+// sizeForDisk shrinks the rootfs tmpfs to what it holds and checks that the
+// data dir has room for the disk image.
+func sizeForDisk(root, data string, budget, rootfsUsed uint64, disk int64) error {
+	rootfsSize, err := rootfsFits(budget, rootfsUsed)
+	if err != nil {
+		return err
+	}
+	if err := spaceFor(data, imageEstimate(rootfsUsed, disk), "the disk image"); err != nil {
+		return err
+	}
+	return errors.Wrap(unix.Mount("", root, "", unix.MS_REMOUNT, fmt.Sprintf("size=%d", rootfsSize)), "shrink rootfs tmpfs")
+}
+
+// syncFile flushes the file at path.
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return errors.Wrap(err, "open image file")
+	}
+	defer f.Close()
+	return errors.Wrap(f.Sync(), "flush image file")
+}
+
+// unpack fetches the image into root, staging each layer in data, outside
+// the image's root.
+func unpack(ctx context.Context, o Options, root, data string, budget uint64, plan *Plan) error {
 	log.Printf("fetching %s", o.Image)
 	img, err := image.Open(ctx, o.Image, "linux/"+runtime.GOARCH, o.InsecureRegistry)
 	if err != nil {
@@ -696,21 +774,31 @@ func unpack(ctx context.Context, o Options, root string, budget uint64, plan *Pl
 		sizes[n] = img.Layers[n].Size
 	}
 	plan.addImage(img.Transport(), img.Digest.String(), sizes)
-	if err := layersFit(budget, sizes); err != nil {
+	fits := layersFit
+	if o.work != nil {
+		fits = unpackedFit
+	}
+	if err := fits(budget, sizes); err != nil {
 		return err
 	}
 	log.Printf("resolved to %s", img.Digest)
-	stage := filepath.Join(workDir, "blobs")
+	stage := filepath.Join(data, "blobs")
 	if err := os.Mkdir(stage, 0o700); err != nil {
 		return errors.Wrap(err, "create staging dir")
 	}
 	err = img.Extract(ctx, root, stage, func(size int64) error {
+		if o.work != nil {
+			return spaceFor(stage, uint64(size), "a staged layer")
+		}
 		var st unix.Statfs_t
 		if err := unix.Statfs(root, &st); err != nil {
 			return errors.Wrap(err, "statfs rootfs")
 		}
 		return capRootfs(root, budget, (st.Blocks-st.Bfree)*uint64(st.Bsize), size)
 	})
+	if o.work != nil {
+		return stagingFull(err)
+	}
 	return outOfRoom(err)
 }
 
@@ -1047,6 +1135,8 @@ var errorClasses = []struct {
 	{ErrLabelClash, "label-clash"},
 	{ErrAborted, "aborted"},
 	{ErrNotEnoughMemory, "not-enough-memory"},
+	{ErrNotEnoughSpace, "not-enough-space"},
+	{ErrBadWorkDir, "bad-workdir"},
 	{ErrAlreadyRunning, "already-running"},
 	{quiesce.ErrUnplaceable, "disk-in-use"},
 	{netcfg.ErrUnsupported, "network-unsupported"},
