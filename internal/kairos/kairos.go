@@ -238,9 +238,20 @@ func unformatted(fs string) bool {
 // dotted key inside the section. With install spelled so and every key
 // under it lowercase and free of dots, both read the same.
 func parseConfig(cfg []byte) (top, install map[string]any, err error) {
-	var doc any
-	if err := yaml.Unmarshal(cfg, &doc); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(cfg))
+	var doc, more any
+	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
 		return nil, nil, errors.Mark(errors.Wrap(err, "parse cloud-config"), ErrBadConfig)
+	}
+	// The agent reads the first document only and drops the rest unseen.
+	for {
+		err := dec.Decode(&more)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil || more != nil {
+			return nil, nil, errors.Mark(errors.New("the cloud-config holds more than one YAML document, and the agent reads only the first; put it all in one"), ErrBadConfig)
+		}
 	}
 	install = map[string]any{}
 	if doc == nil {

@@ -217,6 +217,21 @@ func TestTargetsLeaveTheRestOfTheConfigAlone(t *testing.T) {
 	}
 }
 
+// The agent reads the first YAML document only; an empty one after it
+// drops nothing, and a header comment opens none.
+func TestTargetsAcceptAnEmptyLaterDocument(t *testing.T) {
+	for _, cfg := range []string{
+		"#cloud-config\n---\nusers: []\n",
+		"#cloud-config\na: 1\n---\n",
+		"#cloud-config\na: 1\n---\n# nothing\n",
+		"#cloud-config\na: 1\n...\n",
+	} {
+		if _, _, err := Targets([]byte(cfg)); err != nil {
+			t.Errorf("%q: %v", cfg, err)
+		}
+	}
+}
+
 // An agent that honours the config's own partitions formats one by name
 // only when it has a filesystem, but mounts it by label whatever fs says;
 // extra partitions are never mounted.
