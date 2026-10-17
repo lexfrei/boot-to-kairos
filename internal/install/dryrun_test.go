@@ -310,3 +310,36 @@ func TestPlanDescribesTheBootEntry(t *testing.T) {
 		})
 	}
 }
+
+// On legacy BIOS the plan names the firmware mode and says there is no
+// boot entry, in the text and in the JSON report.
+func TestDryRunOnBIOS(t *testing.T) {
+	for _, output := range []string{OutputText, OutputJSON} {
+		calls := stubMachine(t)
+		sys := fakeSys(t, false)
+		prepareBootEntry = func(raw, disk string, plan *Plan) (*efiboot.Plan, error) {
+			return bootEntry(sys, raw, disk, plan)
+		}
+		plan := &Plan{}
+		var out bytes.Buffer
+		o := Options{Disk: "/dev/vda", DryRun: true, Output: output}
+		if err := proceed(context.Background(), o, nil, plan, strings.NewReader(""), &out, new(bool)); err != nil {
+			t.Fatal(err)
+		}
+		if output == OutputJSON {
+			report(&out, o, plan, nil, false)
+		}
+		want := []*regexp.Regexp{regexp.MustCompile(`firmware: +legacy BIOS\n`), regexp.MustCompile(`boot entry: +none; legacy BIOS boots`)}
+		if output == OutputJSON {
+			want = []*regexp.Regexp{regexp.MustCompile(`\{"name":"firmware","value":"legacy BIOS"\}`), regexp.MustCompile(`\{"name":"boot entry","value":"none; legacy BIOS boots`)}
+		}
+		for _, re := range want {
+			if !re.MatchString(out.String()) {
+				t.Errorf("%s output lacks %s:\n%s", output, re, out.String())
+			}
+		}
+		if slices.Contains(*calls, "write boot entry") {
+			t.Errorf("calls = %v", *calls)
+		}
+	}
+}

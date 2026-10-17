@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/cockroachdb/errors"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 )
 
 // stages are where the carried files are written, as Kairos writes its own
@@ -59,7 +62,14 @@ func Inject(cfg []byte, files []File) ([]byte, error) {
 	if len(doc.Content) == 0 {
 		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
 	}
-	root := doc.Content[0]
+	root, err := resolve(doc.Content[0])
+	if err != nil {
+		return nil, err
+	}
+	if root.Kind == yaml.ScalarNode && root.ShortTag() == "!!null" {
+		root = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	}
+	doc.Content[0] = root
 	if root.Kind != yaml.MappingNode {
 		return nil, errors.New("the cloud-config is not a mapping")
 	}
@@ -99,6 +109,96 @@ func Inject(cfg []byte, files []File) ([]byte, error) {
 		out = append([]byte("#cloud-config\n"), out...)
 	}
 	return out, nil
+}
+
+// resolve returns a copy of n with every alias replaced by a copy of the
+// node it names and every merge key by the keys it merges, read as the
+// YAML decoder reads them, so that extending one place in it extends no
+// other, and a key the user merged in is extended rather than shadowed.
+// The parse in kairos.Targets has refused excessive aliasing by the time
+// this runs.
+func resolve(n *yaml.Node) (*yaml.Node, error) {
+	return resolver{}.resolve(n)
+}
+
+// resolver holds the anchors being expanded, as a node parse accepts one
+// that contains itself.
+type resolver map[*yaml.Node]bool
+
+func (r resolver) resolve(n *yaml.Node) (*yaml.Node, error) {
+	if n.Kind == yaml.AliasNode {
+		if r[n.Alias] {
+			return nil, errors.Newf("cloud-config anchor %s contains itself", n.Value)
+		}
+		r[n.Alias] = true
+		defer delete(r, n.Alias)
+		return r.resolve(n.Alias)
+	}
+	c := *n
+	c.Anchor = ""
+	c.Content = nil
+	// The encoder writes an empty null as '', which reads back as a string.
+	if c.ShortTag() == "!!null" {
+		c.Value = "~"
+	}
+	var merged []*yaml.Node
+	for i := 0; i < len(n.Content); i++ {
+		e, err := r.resolve(n.Content[i])
+		if err != nil {
+			return nil, err
+		}
+		if n.Kind != yaml.MappingNode || i%2 == 1 || !isMerge(n.Content[i]) {
+			c.Content = append(c.Content, e)
+			continue
+		}
+		i++
+		v, err := r.resolve(n.Content[i])
+		if err != nil {
+			return nil, err
+		}
+		// Of keys merged from a list, the earlier mapping's win.
+		from := []*yaml.Node{v}
+		if v.Kind == yaml.SequenceNode {
+			from = v.Content
+		}
+		for _, m := range from {
+			if m.Kind != yaml.MappingNode {
+				return nil, errors.Newf("cloud-config merges a %s, not a mapping, at line %d", m.ShortTag(), m.Line)
+			}
+			merged = append(merged, m.Content...)
+		}
+	}
+	// A key written in the mapping wins over a merged one.
+	for i := 0; i+1 < len(merged); i += 2 {
+		if !hasKey(&c, merged[i]) {
+			c.Content = append(c.Content, merged[i], merged[i+1])
+		}
+	}
+	return &c, nil
+}
+
+// isMerge is the decoder's test: a key tagged !!merge, explicitly or not,
+// is a merge only when spelled <<.
+func isMerge(k *yaml.Node) bool {
+	return k.Kind == yaml.ScalarNode && k.Value == "<<" && k.ShortTag() == "!!merge"
+}
+
+// hasKey compares keys decoded, as a merge does, so 0x10 and 16 are one
+// key. "1" and 1 are one too, though a merge keeps both: the decoder
+// refuses them written side by side, which the result would be.
+func hasKey(m, key *yaml.Node) bool {
+	var want any
+	wantErr := key.Decode(&want)
+	for i := 0; i < len(m.Content); i += 2 {
+		if m.Content[i].Value == key.Value {
+			return true
+		}
+		var k any
+		if wantErr == nil && m.Content[i].Decode(&k) == nil && reflect.DeepEqual(k, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // child returns the value of key in m, added empty if missing.
@@ -143,7 +243,7 @@ func UserConfigures(cfg []byte) (string, error) {
 		} `yaml:"install"`
 	}
 	if err := yaml.Unmarshal(cfg, &c); err != nil {
-		return "", errors.Wrap(err, "parse cloud-config")
+		return "", errors.Mark(errors.Wrap(err, "parse cloud-config"), kairos.ErrBadConfig)
 	}
 	for name, entries := range c.Stages {
 		for i := range entries {

@@ -100,7 +100,16 @@ func TestARefusalIsReportedWithItsClass(t *testing.T) {
 		{ErrMissingDisk, "usage"},
 		{cerrors.Wrap(ErrBadOutput, "yaml"), "usage"},
 		{cerrors.Wrap(ErrBadConfig, "no header"), "bad-config"},
-		{configURLRefusal(t), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\nconfig_url: https://example.com/c.yaml\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\ninstall: [\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\n- install\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\ninstall: {partitions: [oem]}\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\ninstall: {extra-partitions: {data: {}}}\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\nusers: []\n---\nstages: {}\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\na: 1\n---\n[\n"), "bad-config"},
+		{targetsRefusal(t, "#cloud-config\na: 1\n---\n# empty\n---\nusers: [x]\n"), "bad-config"},
+		{networkRefusal(t, "#cloud-config\nstages: [a]\n"), "bad-config"},
+		{networkRefusal(t, "#cloud-config\ninstall: 5\n"), "bad-config"},
 		{ErrBIOSUnsupported, "bios-unsupported"},
 		{ErrLabelClash, "label-clash"},
 		{ErrAborted, "aborted"},
@@ -215,11 +224,24 @@ func TestARunThatCannotTakeTheLockIsReported(t *testing.T) {
 	}
 }
 
-func configURLRefusal(t *testing.T) error {
+// networkRefusal returns netcfg's refusal of a cfg that Targets accepts.
+func networkRefusal(t *testing.T, cfg string) error {
 	t.Helper()
-	_, _, err := kairos.Targets([]byte("#cloud-config\nconfig_url: https://example.com/c.yaml\n"), nil)
+	if _, _, err := kairos.Targets([]byte(cfg)); err != nil {
+		t.Fatalf("Targets refused %q first: %v", cfg, err)
+	}
+	_, err := netcfg.UserConfigures([]byte(cfg))
 	if err == nil {
-		t.Fatal("config_url was not refused")
+		t.Fatalf("%q was not refused", cfg)
+	}
+	return err
+}
+
+func targetsRefusal(t *testing.T, cfg string) error {
+	t.Helper()
+	_, _, err := kairos.Targets([]byte(cfg))
+	if err == nil {
+		t.Fatalf("%q was not refused", cfg)
 	}
 	return err
 }

@@ -3,9 +3,11 @@
 package netcfg
 
 import (
+	"bytes"
 	"errors"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -49,7 +51,7 @@ func inject(t *testing.T, cfg string) yipConfig {
 	if err := kairos.CheckConfig(out); err != nil {
 		t.Fatalf("%v:\n%s", err, out)
 	}
-	if _, _, err := kairos.Targets(out, nil); err != nil {
+	if _, _, err := kairos.Targets(out); err != nil {
 		t.Fatalf("%v:\n%s", err, out)
 	}
 	var c yipConfig
@@ -106,11 +108,130 @@ stages:
 	}
 }
 
+// The agent reads a null document as an empty config.
 func TestInjectIntoAnEmptyConfig(t *testing.T) {
-	c := inject(t, "#cloud-config\n")
-	if len(c.Stages["initramfs"]) != 1 {
-		t.Errorf("stages = %+v", c.Stages)
+	for _, cfg := range []string{"#cloud-config\n", "#cloud-config\n---\n", "#cloud-config\n~\n", "#cloud-config\n--- !!null\n"} {
+		c := inject(t, cfg)
+		if len(c.Stages["initramfs"]) != 1 {
+			t.Errorf("%q: stages = %+v", cfg, c.Stages)
+		}
 	}
+}
+
+// The user's stages are extended wherever YAML puts them, and a node
+// several keys share through an alias is extended once per key, not once
+// for all of them.
+func TestInjectFollowsAliasesAndMerges(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg   string
+		mine  []string
+		alone map[string]int
+	}{
+		"aliased stages": {
+			cfg:  "#cloud-config\nx: &s {initramfs: [{name: mine}]}\nstages: *s\n",
+			mine: []string{"initramfs"},
+		},
+		"one list under two stages": {
+			cfg:   "#cloud-config\nl: &l [{name: mine}]\nstages: {initramfs: *l, rootfs.before: *l}\n",
+			mine:  []string{"initramfs", "rootfs.before"},
+			alone: map[string]int{"l": 1},
+		},
+		"merged stages": {
+			cfg:  "#cloud-config\nbase: &b {stages: {initramfs: [{name: mine}]}}\n<<: *b\n",
+			mine: []string{"initramfs"},
+		},
+		"merged beside a value spelled like its key": {
+			cfg:  "#cloud-config\nbase: &b {stages: {initramfs: [{name: mine}]}}\nname: stages\n<<: *b\n",
+			mine: []string{"initramfs"},
+		},
+		"merged from a list": {
+			cfg:  "#cloud-config\na: &a {stages: {initramfs: [{name: mine}]}}\nb: &b {stages: {initramfs: [{name: other}]}}\n<<: [*a, *b]\n",
+			mine: []string{"initramfs"},
+		},
+		"written over merged": {
+			cfg:  "#cloud-config\nb: &b {stages: {initramfs: [{name: other}]}}\n<<: *b\nstages: {initramfs: [{name: mine}]}\n",
+			mine: []string{"initramfs"},
+		},
+		"merged into stages": {
+			cfg:  "#cloud-config\nbase: &b {initramfs: [{name: mine}]}\nstages: {<<: *b}\n",
+			mine: []string{"initramfs"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := inject(t, tc.cfg)
+			for _, stage := range stages {
+				s := c.Stages[stage]
+				want := 1
+				if slices.Contains(tc.mine, stage) {
+					want = 2
+				}
+				if len(s) != want || s[want-1].Name != stageName || (want == 2 && s[0].Name != "mine") {
+					t.Errorf("%s = %+v, want the user's entry and one carried after it", stage, s)
+				}
+			}
+			out, err := Inject([]byte(tc.cfg), carried)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.ContainsAny(out, "&*") {
+				t.Errorf("out keeps an anchor or alias:\n%s", out)
+			}
+			var top map[string]any
+			if err := yaml.Unmarshal(out, &top); err != nil {
+				t.Fatal(err)
+			}
+			for key, n := range tc.alone {
+				if l, _ := top[key].([]any); len(l) != n {
+					t.Errorf("%s = %v, want it left as written", key, top[key])
+				}
+			}
+		})
+	}
+}
+
+func TestResolveReadsAsTheDecoderDoes(t *testing.T) {
+	for _, cfg := range []string{
+		"a: &a {k: 1}\nx: {!!merge foo: *a, k: 2}\n",
+		"a: &a {k: 1}\nx: {\"<<\": *a, k: 2}\n",
+		"a: &a {0x10: m}\nx: {<<: *a, 16: w}\n",
+		"a: &a {k: 1}\nb: &b {k: 2, j: 3}\nx: {<<: [*a, *b]}\n",
+		"a: &a {k: 1}\nn: &n {<<: *a, j: 2}\nx: *n\ny: {<<: *n, k: 5}\n",
+		"x: {a}\n",
+		"x: {a: }\n",
+		"x: [a, {b}]\n",
+		"x: {a: ~}\n",
+		"x: {a: ''}\n",
+		"x: {a: \"\"}\n",
+	} {
+		var want, got any
+		if err := yaml.Unmarshal([]byte(cfg), &want); err != nil {
+			t.Fatal(err)
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(cfg), &doc); err != nil {
+			t.Fatal(err)
+		}
+		r, err := resolve(doc.Content[0])
+		if err != nil {
+			t.Fatalf("%q: %v", cfg, err)
+		}
+		out, err := yaml.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal(out, &got); err != nil {
+			t.Fatalf("%q resolved to:\n%s%v", cfg, out, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q resolved reads %v, want %v", cfg, got, want)
+		}
+	}
+}
+
+// A merge keeps "1" beside 1, but the decoder refuses the two written
+// side by side.
+func TestInjectOutputParsesWhereMergedKeysCollideAsText(t *testing.T) {
+	inject(t, "#cloud-config\na: &a {\"1\": m}\nx: {<<: *a, 1: w}\n")
 }
 
 func TestInjectRefusesWhatItCannotExtend(t *testing.T) {
@@ -118,6 +239,10 @@ func TestInjectRefusesWhatItCannotExtend(t *testing.T) {
 		"#cloud-config\nstages: none\n",
 		"#cloud-config\nstages:\n  initramfs: none\n",
 		"#cloud-config\n- a list\n",
+		"#cloud-config\na scalar\n",
+		"#cloud-config\n<<: 5\n",
+		"#cloud-config\na: &a [*a]\n",
+		"#cloud-config\na: &a {<<: *a}\n",
 	} {
 		if _, err := Inject([]byte(cfg), carried); err == nil {
 			t.Errorf("%q: no error", cfg)

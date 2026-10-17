@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -56,8 +57,8 @@ var (
 	ErrMissingDisk     = errors.New("--disk is required")
 	ErrMissingConfig   = errors.New("--cloud-config is required")
 	ErrNotWholeDisk    = errors.New("--disk must be a whole disk")
-	ErrBadConfig       = errors.New("--cloud-config is not a cloud-config")
-	ErrBIOSUnsupported = errors.New("legacy BIOS boot is not supported")
+	ErrBadConfig       = kairos.ErrBadConfig
+	ErrBIOSUnsupported = errors.New("legacy BIOS cannot boot this install")
 	ErrAborted         = errors.New("aborted by user")
 	ErrBadOutput       = errors.New("--output must be text or json")
 	ErrLabelClash      = errors.New("host partitions carry names kairos-agent uses")
@@ -111,10 +112,53 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 	if err := kairos.CheckConfig(cfg); err != nil {
 		return nil, errors.Wrap(ErrBadConfig, err.Error())
 	}
-	if _, err := os.Stat(filepath.Join(sysfs, "firmware/efi")); err != nil {
-		return nil, ErrBIOSUnsupported
-	}
 	return cfg, nil
+}
+
+// Firmware returns the mode the running system booted in, which is the one
+// kairos-agent installs for: it looks for /sys/firmware/efi too.
+func Firmware(sysfs string) (string, error) {
+	_, err := os.Stat(filepath.Join(sysfs, "firmware/efi"))
+	switch {
+	case err == nil:
+		return kairos.EFI, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return kairos.BIOS, nil
+	}
+	return "", errors.Wrap(err, "tell UEFI from legacy BIOS")
+}
+
+// checkFirmware returns the mode the machine booted in and refuses an
+// install that would not boot in it.
+func checkFirmware(cfg []byte, sysfs, arch, disk string, sectorSize func(string) (int, error)) (string, error) {
+	firmware, err := Firmware(sysfs)
+	if err != nil {
+		return "", err
+	}
+	if firmware == kairos.BIOS && arch != "amd64" {
+		return "", errors.Mark(errors.Newf("this machine did not boot through UEFI, and a legacy BIOS install is supported only on x86-64, not on %s", arch), ErrBIOSUnsupported)
+	}
+	if err := kairos.CheckFirmware(cfg, firmware); err != nil {
+		return "", errors.Mark(err, ErrBadConfig)
+	}
+	sector, err := sectorSize(disk)
+	if err != nil {
+		return "", err
+	}
+	if err := checkBootable(firmware, sector); err != nil {
+		return "", err
+	}
+	return firmware, nil
+}
+
+// checkBootable refuses a legacy BIOS install onto a disk whose logical
+// sectors are not 512 bytes: legacy firmware commonly cannot read one, and
+// the machine would come back with nothing to boot.
+func checkBootable(firmware string, sector int) error {
+	if firmware == kairos.BIOS && sector != 512 {
+		return errors.Mark(errors.Newf("legacy BIOS firmware commonly cannot boot a disk with %d-byte sectors; refusing to leave the machine unbootable", sector), ErrBIOSUnsupported)
+	}
+	return nil
 }
 
 // Run installs the image and reboots into it. Every step before the disk is
@@ -153,12 +197,11 @@ func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
 	if err := quiesce.Preflight(o.Disk); err != nil {
 		return err
 	}
-	cmdline, err := os.ReadFile("/proc/cmdline")
+	names, labels, err := kairos.Targets(cfg)
 	if err != nil {
-		return errors.Wrap(err, "read /proc/cmdline")
+		return err
 	}
-	names, labels, err := kairos.Targets(cfg, cmdline)
-	if err != nil {
+	if _, err := checkFirmware(cfg, "/sys", runtime.GOARCH, o.Disk, flash.SectorSize); err != nil {
 		return err
 	}
 	clashes := append(kairos.LabelClashes("/dev/disk/by-partlabel", names), kairos.LabelClashes("/dev/disk/by-label", labels)...)
@@ -264,8 +307,19 @@ const efivars = "/sys/firmware/efi/efivars"
 
 // bootEntry prepares the boot entry while the old disk can still be read.
 // Without efivarfs there is nothing to write it to, and the firmware's
-// fallback is all the new system has.
-func bootEntry(raw, disk string, summary *Plan) (*efiboot.Plan, error) {
+// fallback is all the new system has. Legacy BIOS has no entries: it boots
+// the boot sector the image put on the disk.
+func bootEntry(sysfs, raw, disk string, summary *Plan) (*efiboot.Plan, error) {
+	firmware, err := Firmware(sysfs)
+	if err != nil {
+		return nil, err
+	}
+	if firmware == kairos.BIOS {
+		summary.Add("firmware", "legacy BIOS")
+		summary.Add("boot entry", "none; legacy BIOS boots the boot sector the image put on the disk")
+		return nil, nil //nolint:nilnil // nothing to write is not an error
+	}
+	summary.Add("firmware", "UEFI")
 	if err := efiboot.Available(efivars); err != nil {
 		log.Printf("warning: %v; no boot entry will be written, the firmware has to fall back to \\EFI\\BOOT on the disk", err)
 		summary.addBootEntry(disk, err, nil)
@@ -328,8 +382,10 @@ var (
 	writeImage           = flash.WriteVerified
 	syncOthers           = quiesce.SyncOthers
 	reboot               = func() error { return unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART) }
-	prepareBootEntry     = bootEntry
-	applyBootEntry       = writeBootEntry
+	prepareBootEntry     = func(raw, disk string, summary *Plan) (*efiboot.Plan, error) {
+		return bootEntry("/sys", raw, disk, summary)
+	}
+	applyBootEntry = writeBootEntry
 )
 
 const writeAttempts = 3
