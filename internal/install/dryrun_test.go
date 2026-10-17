@@ -19,6 +19,7 @@ import (
 
 	"github.com/lexfrei/boot-to-kairos/internal/efiboot"
 	"github.com/lexfrei/boot-to-kairos/internal/flash"
+	"github.com/lexfrei/boot-to-kairos/internal/identity"
 	"github.com/lexfrei/boot-to-kairos/internal/netcfg"
 	"github.com/lexfrei/boot-to-kairos/internal/quiesce"
 )
@@ -31,12 +32,16 @@ var builtConfig []byte
 func stubMachine(t *testing.T) *[]string {
 	t.Helper()
 	c, b, p, q, s, l, w, y, r := captureNetwork, buildImage, enterPointOfNoReturn, quiesceDisk, planStop, lockCheck, writeImage, syncOthers, reboot
-	pe, ae := prepareBootEntry, applyBootEntry
+	pe, ae, ci := prepareBootEntry, applyBootEntry, captureIdentity
 	t.Cleanup(func() {
 		captureNetwork, buildImage, enterPointOfNoReturn, quiesceDisk, planStop, lockCheck, writeImage, syncOthers, reboot = c, b, p, q, s, l, w, y, r
-		prepareBootEntry, applyBootEntry = pe, ae
+		prepareBootEntry, applyBootEntry, captureIdentity = pe, ae, ci
 	})
 	var calls []string
+	captureIdentity = func(context.Context) (*identity.Host, error) {
+		calls = append(calls, "capture identity")
+		return &identity.Host{}, nil
+	}
 	captureNetwork = func() (*netcfg.Host, error) {
 		calls = append(calls, "capture network")
 		return &netcfg.Host{}, nil

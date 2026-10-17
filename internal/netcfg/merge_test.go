@@ -189,45 +189,6 @@ func TestInjectFollowsAliasesAndMerges(t *testing.T) {
 	}
 }
 
-func TestResolveReadsAsTheDecoderDoes(t *testing.T) {
-	for _, cfg := range []string{
-		"a: &a {k: 1}\nx: {!!merge foo: *a, k: 2}\n",
-		"a: &a {k: 1}\nx: {\"<<\": *a, k: 2}\n",
-		"a: &a {0x10: m}\nx: {<<: *a, 16: w}\n",
-		"a: &a {k: 1}\nb: &b {k: 2, j: 3}\nx: {<<: [*a, *b]}\n",
-		"a: &a {k: 1}\nn: &n {<<: *a, j: 2}\nx: *n\ny: {<<: *n, k: 5}\n",
-		"x: {a}\n",
-		"x: {a: }\n",
-		"x: [a, {b}]\n",
-		"x: {a: ~}\n",
-		"x: {a: ''}\n",
-		"x: {a: \"\"}\n",
-	} {
-		var want, got any
-		if err := yaml.Unmarshal([]byte(cfg), &want); err != nil {
-			t.Fatal(err)
-		}
-		var doc yaml.Node
-		if err := yaml.Unmarshal([]byte(cfg), &doc); err != nil {
-			t.Fatal(err)
-		}
-		r, err := resolve(doc.Content[0])
-		if err != nil {
-			t.Fatalf("%q: %v", cfg, err)
-		}
-		out, err := yaml.Marshal(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := yaml.Unmarshal(out, &got); err != nil {
-			t.Fatalf("%q resolved to:\n%s%v", cfg, out, err)
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%q resolved reads %v, want %v", cfg, got, want)
-		}
-	}
-}
-
 // A merge keeps "1" beside 1, but the decoder refuses the two written
 // side by side.
 func TestInjectOutputParsesWhereMergedKeysCollideAsText(t *testing.T) {

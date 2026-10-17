@@ -85,10 +85,13 @@ if [ "$before" != "$after" ]; then
 fi
 grep --quiet '^  filesystems to stop: ' dry-run.log
 
-# ssh exits 255 when the reboot drops the connection; any other non-zero
-# status is the installer failing before it got there.
+# The install runs without the identity carried over, so that an ubuntu
+# account on Kairos can only come from the seed. The carry-over itself is
+# not booted here; it is tested by hand on a VM, as the README's Tested
+# section lists. ssh exits 255 when the reboot drops the connection; any
+# other non-zero status is the installer failing before it got there.
 rc=0
-vm ubuntu@127.0.0.1 "sudo ./boot-to-kairos --image $(printf %q "$image") --disk /dev/vda --cloud-config cfg.yaml --yes" || rc=$?
+vm ubuntu@127.0.0.1 "sudo ./boot-to-kairos --image $(printf %q "$image") --disk /dev/vda --cloud-config cfg.yaml --keep-identity=false --yes" || rc=$?
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 255 ]; then
 	echo "boot-to-kairos exited with $rc" >&2
 	exit 1
@@ -100,6 +103,22 @@ vm kairos@127.0.0.1 'lsblk -o NAME,SIZE,LABEL /dev/vda'
 state=$(vm kairos@127.0.0.1 'kairos-agent state get boot')
 echo "boot state: $state"
 test "$state" = active_boot
+
+# The seed that set up Ubuntu is still attached. Kairos would apply its
+# user-data and create ubuntu again; with the identity not carried, an
+# ubuntu account can only come from there.
+# shellcheck disable=SC2016 # expanded on the VM
+vm kairos@127.0.0.1 'sudo test -d /oem/95_userdata && out=$(sudo ls -A /oem/95_userdata) && test -z "$out"' ||
+	{ echo "/oem/95_userdata is missing or not empty: Kairos read the seed's user-data" >&2; exit 1; }
+# The image has no getent. grep exits 1 for no match; anything else, ssh's
+# 255 included, fails.
+rc=0
+vm kairos@127.0.0.1 "grep -q '^ubuntu:' /etc/passwd" || rc=$?
+if [ "$rc" -ne 1 ]; then
+	echo "looking up ubuntu in /etc/passwd exited with $rc, not 1: the seed's user-data created ubuntu, or the check did not run" >&2
+	exit 1
+fi
+echo "datasources: /oem/95_userdata empty, no ubuntu user"
 
 # Legacy BIOS boots GRUB from the boot sector and the GPT's BIOS boot
 # partition; Kairos must have come up without EFI.
