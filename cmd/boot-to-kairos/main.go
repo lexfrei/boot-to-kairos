@@ -25,7 +25,8 @@ var version = "dev"
 
 func main() {
 	var o install.Options
-	flag.StringVar(&o.Image, "image", "", "Kairos OCI image, for example quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0")
+	flag.StringVar(&o.Image, "image", "", "Kairos OCI image: a registry reference such as quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0, oci:DIR for an OCI image layout or oci-archive:FILE for one in a tar archive")
+	flag.BoolVar(&o.InsecureRegistry, "insecure-registry", false, "allow plain http to a registry that is not at a loopback address; otherwise it is reached over https only")
 	flag.StringVar(&o.Disk, "disk", "", "whole disk to replace, for example /dev/sda (all data is erased)")
 	flag.StringVar(&o.ConfigPath, "cloud-config", "", "cloud-config for the installed system; it must give you a way to log in")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask for confirmation")

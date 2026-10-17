@@ -17,6 +17,7 @@ import (
 
 	cerrors "github.com/cockroachdb/errors"
 
+	"github.com/lexfrei/boot-to-kairos/internal/image"
 	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 	"github.com/lexfrei/boot-to-kairos/internal/netcfg"
 	"github.com/lexfrei/boot-to-kairos/internal/quiesce"
@@ -117,6 +118,11 @@ func TestARefusalIsReportedWithItsClass(t *testing.T) {
 		{cerrors.Wrap(ErrAlreadyRunning, "held"), "already-running"},
 		{cerrors.Wrap(quiesce.ErrUnplaceable, "zfs"), "disk-in-use"},
 		{cerrors.Wrap(netcfg.ErrUnsupported, "team0"), "network-unsupported"},
+		{cerrors.Wrap(image.ErrPlatform, "resolve"), "bad-image"},
+		{cerrors.Wrap(image.ErrMismatch, "layer 0"), "bad-image"},
+		{cerrors.Wrap(image.ErrAmbiguous, "resolve"), "bad-image"},
+		{cerrors.Wrap(image.ErrLegacyDockerArchive, "resolve"), "bad-image"},
+		{cerrors.Wrap(image.ErrInsecureRegistry, "10.0.0.5:5000"), "bad-image"},
 		{cerrors.Wrap(context.Canceled, "pull"), "interrupted"},
 		{cerrors.Wrap(unix.EIO, "pull"), "error"},
 	} {

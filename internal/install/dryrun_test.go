@@ -188,6 +188,20 @@ func TestPlanDescribesTheDiskAndTheImage(t *testing.T) {
 	}
 }
 
+func TestPlanDescribesTheResolvedImage(t *testing.T) {
+	var out bytes.Buffer
+	p := &Plan{}
+	p.addImage("OCI image archive", "sha256:f29481c2351b91ab61d28a40eb76a0a406120689f9fa93ac53f7f6f502159d89", []int64{144 << 20, 71<<20 + 1})
+	p.Print(&out)
+	want := "" +
+		"  image source:   OCI image archive\n" +
+		"  image manifest: sha256:f29481c2351b91ab61d28a40eb76a0a406120689f9fa93ac53f7f6f502159d89\n" +
+		"  image layers:   2, 215 MiB as stored\n"
+	if out.String() != want {
+		t.Fatalf("summary =\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
 const plainConfig = "#cloud-config\nusers:\n  - name: kairos\n"
 
 func staticHost() *netcfg.Host {

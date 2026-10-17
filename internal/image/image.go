@@ -1,4 +1,5 @@
-// Package image pulls a Kairos OCI image and unpacks its root filesystem.
+// Package image fetches a Kairos OCI image from a registry or a local image
+// layout and unpacks its root filesystem.
 package image
 
 import (
@@ -12,58 +13,79 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/partial"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	"golang.org/x/sys/unix"
 )
 
-// Image is a pulled OCI image.
+// Image is a resolved OCI image whose layers have not been fetched yet.
 type Image struct {
-	img v1.Image
-	ref string
-}
+	// Digest is the digest of the manifest picked for the platform.
+	Digest v1.Hash
+	// Layers are the manifest's layer descriptors, oldest first.
+	Layers []v1.Descriptor
 
-// Pull resolves ref for the given platform (for example linux/amd64). ctx
-// also bounds the layer downloads that Extract triggers.
-func Pull(ctx context.Context, ref, platform string) (*Image, error) {
-	r, err := name.ParseReference(ref)
-	if err != nil {
-		return nil, errors.Wrapf(err, "parse %s", ref)
-	}
-	p, err := v1.ParsePlatform(platform)
-	if err != nil {
-		return nil, errors.Wrapf(err, "parse platform %s", platform)
-	}
-	img, err := remote.Image(r, remote.WithContext(ctx), remote.WithPlatform(*p), remote.WithAuthFromKeychain(authn.DefaultKeychain))
-	if err != nil {
-		return nil, errors.Wrapf(err, "pull %s", ref)
-	}
-	return &Image{img: img, ref: ref}, nil
+	src source
 }
 
 // Extract applies the image's layers to dest, oldest first, the way a
-// container runtime does. Every path is resolved inside dest, so an entry or
-// a symlink in the image can never make the extraction write outside it;
-// such entries are skipped.
-func (i *Image) Extract(dest string) error {
-	layers, err := i.img.Layers()
-	if err != nil {
-		return errors.Wrap(err, "list layers")
-	}
-	for n, l := range layers {
-		rc, err := l.Uncompressed()
-		if err != nil {
-			return errors.Wrapf(err, "open layer %d", n)
+// container runtime does. Each layer is first copied to a file in stage and
+// verified against its digest, then applied from that file and removed, so a
+// layer that does not match is refused before any of it reaches dest. fits
+// is asked before each layer is fetched, with its size as stored. Every
+// path is resolved inside dest, so an entry or a symlink in the image can
+// never make the extraction write outside it; such entries are skipped.
+func (i *Image) Extract(ctx context.Context, dest, stage string, fits func(size int64) error) error {
+	for n := range i.Layers {
+		l := &i.Layers[n]
+		if err := fits(l.Size); err != nil {
+			return errors.Wrapf(err, "layer %d", n)
 		}
-		err = extractTar(dest, rc)
-		rc.Close()
+		blob, err := stageBlob(ctx, i.src, l, stage)
+		if err != nil {
+			return errors.Wrapf(err, "layer %d", n)
+		}
+		err = applyLayer(ctx, dest, blob, l)
+		_ = os.Remove(blob)
 		if err != nil {
 			return errors.Wrapf(err, "layer %d", n)
 		}
 	}
 	return nil
+}
+
+// Transport names where the image is read from.
+func (i *Image) Transport() string { return i.src.transport() }
+
+// Close releases the local image layout or archive.
+func (i *Image) Close() error { return i.src.close() }
+
+// stagedLayer is a verified layer file. Read through partial, it is read
+// once, sniffed for gzip or zstd; tarball.LayerFromOpener would digest it
+// and unpack it once more first.
+type stagedLayer struct {
+	path string
+	d    *v1.Descriptor
+}
+
+func (s stagedLayer) Digest() (v1.Hash, error)            { return s.d.Digest, nil }
+func (s stagedLayer) Compressed() (io.ReadCloser, error)  { return os.Open(s.path) }
+func (s stagedLayer) Size() (int64, error)                { return s.d.Size, nil }
+func (s stagedLayer) MediaType() (types.MediaType, error) { return s.d.MediaType, nil }
+
+// applyLayer applies a verified layer file, gzip, zstd or uncompressed.
+func applyLayer(ctx context.Context, dest, blob string, d *v1.Descriptor) error {
+	l, err := partial.CompressedToLayer(stagedLayer{blob, d})
+	if err != nil {
+		return errors.Wrap(err, "open layer")
+	}
+	rc, err := l.Uncompressed()
+	if err != nil {
+		return errors.Wrap(err, "open layer")
+	}
+	defer rc.Close()
+	return extractTar(dest, ctxReader{ctx, rc})
 }
 
 const (
@@ -86,8 +108,8 @@ func extractTar(dest string, r io.Reader) error {
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			// The layer's digest is checked only when its stream hits EOF,
-			// which lies past the tar end marker.
+			// A decompressor reports a malformed stream, a gzip checksum
+			// say, only at its end, which lies past the tar end marker.
 			_, err = io.Copy(io.Discard, r)
 			return errors.Wrap(err, "read layer to the end")
 		}
