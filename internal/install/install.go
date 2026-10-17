@@ -58,7 +58,7 @@ var (
 	ErrMissingConfig   = errors.New("--cloud-config is required")
 	ErrNotWholeDisk    = errors.New("--disk must be a whole disk")
 	ErrBadConfig       = kairos.ErrBadConfig
-	ErrBIOSUnsupported = errors.New("legacy BIOS boot is not supported")
+	ErrBIOSUnsupported = errors.New("legacy BIOS cannot boot this install")
 	ErrAborted         = errors.New("aborted by user")
 	ErrBadOutput       = errors.New("--output must be text or json")
 	ErrLabelClash      = errors.New("host partitions carry names kairos-agent uses")
