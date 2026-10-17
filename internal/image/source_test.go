@@ -673,3 +673,19 @@ func TestOpenRefusesADigestThatIsNotSHA256(t *testing.T) {
 		t.Fatalf("err = %v, want the sha512 digest refused", err)
 	}
 }
+
+func TestApplyingALayerStopsWhenCancelled(t *testing.T) {
+	img, dir := twoLayers(t)
+	m, err := img.Manifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := m.Layers[0]
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	dest := t.TempDir()
+	if err := applyLayer(ctx, dest, blobPath(dir, d.Digest), &d); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation", err)
+	}
+	assertEmpty(t, dest)
+}

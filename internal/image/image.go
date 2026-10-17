@@ -46,7 +46,7 @@ func (i *Image) Extract(ctx context.Context, dest, stage string, fits func(size 
 		if err != nil {
 			return errors.Wrapf(err, "layer %d", n)
 		}
-		err = applyLayer(dest, blob, l)
+		err = applyLayer(ctx, dest, blob, l)
 		_ = os.Remove(blob)
 		if err != nil {
 			return errors.Wrapf(err, "layer %d", n)
@@ -75,7 +75,7 @@ func (s stagedLayer) Size() (int64, error)                { return s.d.Size, nil
 func (s stagedLayer) MediaType() (types.MediaType, error) { return s.d.MediaType, nil }
 
 // applyLayer applies a verified layer file, gzip, zstd or uncompressed.
-func applyLayer(dest, blob string, d *v1.Descriptor) error {
+func applyLayer(ctx context.Context, dest, blob string, d *v1.Descriptor) error {
 	l, err := partial.CompressedToLayer(stagedLayer{blob, d})
 	if err != nil {
 		return errors.Wrap(err, "open layer")
@@ -85,7 +85,7 @@ func applyLayer(dest, blob string, d *v1.Descriptor) error {
 		return errors.Wrap(err, "open layer")
 	}
 	defer rc.Close()
-	return extractTar(dest, rc)
+	return extractTar(dest, ctxReader{ctx, rc})
 }
 
 const (
