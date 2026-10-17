@@ -137,6 +137,10 @@ func (r resolver) resolve(n *yaml.Node) (*yaml.Node, error) {
 	c := *n
 	c.Anchor = ""
 	c.Content = nil
+	// The encoder writes an empty null as '', which reads back as a string.
+	if c.ShortTag() == "!!null" {
+		c.Value = "~"
+	}
 	var merged []*yaml.Node
 	for i := 0; i < len(n.Content); i++ {
 		e, err := r.resolve(n.Content[i])

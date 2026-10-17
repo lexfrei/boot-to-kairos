@@ -196,6 +196,12 @@ func TestResolveReadsAsTheDecoderDoes(t *testing.T) {
 		"a: &a {0x10: m}\nx: {<<: *a, 16: w}\n",
 		"a: &a {k: 1}\nb: &b {k: 2, j: 3}\nx: {<<: [*a, *b]}\n",
 		"a: &a {k: 1}\nn: &n {<<: *a, j: 2}\nx: *n\ny: {<<: *n, k: 5}\n",
+		"x: {a}\n",
+		"x: {a: }\n",
+		"x: [a, {b}]\n",
+		"x: {a: ~}\n",
+		"x: {a: ''}\n",
+		"x: {a: \"\"}\n",
 	} {
 		var want, got any
 		if err := yaml.Unmarshal([]byte(cfg), &want); err != nil {
