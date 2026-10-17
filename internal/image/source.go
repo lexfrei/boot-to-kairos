@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -38,6 +39,9 @@ var (
 	// ErrLegacyDockerArchive is a docker save archive in the format Docker
 	// 25 replaced with an OCI image layout.
 	ErrLegacyDockerArchive = errors.New("a docker save archive without an OCI index is not supported")
+	// ErrInsecureRegistry is a redirect to plain http to an address other
+	// than a loopback one.
+	ErrInsecureRegistry = errors.New("plain http to a registry on another machine is refused")
 
 	errLocal   = errors.New("local write")
 	errStalled = errors.New("no data received")
@@ -57,6 +61,8 @@ const (
 
 // retryDelay is the first wait between fetches; it doubles each time.
 var retryDelay = time.Second //nolint:gochecknoglobals // test seam
+
+var registryTransport = remote.DefaultTransport //nolint:gochecknoglobals // test seam
 
 // stallTimeout drops a fetch that has received nothing for this long, so a
 // stream that stops without breaking is retried rather than waited on.
@@ -79,14 +85,15 @@ type source interface {
 // Open resolves ref for platform, for example linux/amd64, and reads its
 // manifest and config; layers are fetched by Extract. ref is a registry
 // reference, oci:DIR for an OCI image layout directory or oci-archive:FILE
-// for the same as a tar archive. ctx bounds the requests. Close the image
-// once it is extracted.
-func Open(ctx context.Context, ref, platform string) (*Image, error) {
+// for the same as a tar archive. ctx bounds the requests. insecure allows
+// plain http to a registry other than this machine. Close the image once it
+// is extracted.
+func Open(ctx context.Context, ref, platform string, insecure bool) (*Image, error) {
 	want, err := v1.ParsePlatform(platform)
 	if err != nil {
 		return nil, errors.Wrapf(err, "parse platform %s", platform)
 	}
-	src, err := openSource(ref)
+	src, err := openSource(ref, insecure)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +105,7 @@ func Open(ctx context.Context, ref, platform string) (*Image, error) {
 	return &Image{Digest: digest, Layers: m.Layers, src: src}, nil
 }
 
-func openSource(ref string) (source, error) {
+func openSource(ref string, insecure bool) (source, error) {
 	if dir, ok := strings.CutPrefix(ref, ociPrefix); ok {
 		root, err := os.OpenRoot(dir)
 		if err != nil {
@@ -113,11 +120,18 @@ func openSource(ref string) (source, error) {
 		}
 		return layoutSource{file: open, closer: closer, kind: "OCI image archive"}, nil
 	}
-	r, err := name.ParseReference(ref)
+	var opts []name.Option
+	if insecure {
+		opts = append(opts, name.Insecure)
+	}
+	r, err := name.ParseReference(ref, opts...)
 	if err != nil {
 		return nil, errors.Wrapf(err, "parse %s", ref)
 	}
-	return registrySource{ref: r}, nil
+	if insecure {
+		log.Printf("plain http allowed for %s", r.Context().RegistryStr())
+	}
+	return registrySource{ref: r, insecure: insecure}, nil
 }
 
 // resolveManifest walks from the source's root down to the image manifest
@@ -402,11 +416,19 @@ func retry(ctx context.Context, src source, what string, fetch func() error) err
 
 // registrySource reads from a registry. The client's own retries are off:
 // they cover only the request, not the body, and would multiply with ours.
-type registrySource struct{ ref name.Reference }
+type registrySource struct {
+	ref      name.Reference
+	insecure bool
+}
 
 func (r registrySource) options(ctx context.Context) []remote.Option {
+	var t http.RoundTripper = httpsOnly{registryTransport}
+	if r.insecure {
+		t = registryTransport
+	}
 	return []remote.Option{
 		remote.WithContext(ctx),
+		remote.WithTransport(t),
 		remote.WithAuthFromKeychain(authn.DefaultKeychain),
 		remote.WithRetryBackoff(remote.Backoff{Steps: 1}),
 		remote.WithRetryStatusCodes(),
@@ -455,11 +477,19 @@ func manifestMismatch(err error) error {
 
 func (registrySource) close() error { return nil }
 
-func (registrySource) transport() string { return "registry" }
+func (r registrySource) transport() string {
+	if r.insecure {
+		return "registry, plain http allowed"
+	}
+	return "registry"
+}
 
 // transient is everything but an answer the registry would give again,
-// or a certificate this machine does not accept.
+// a certificate this machine does not accept, or a redirect to plain http.
 func (registrySource) transient(err error) bool {
+	if errors.Is(err, ErrInsecureRegistry) {
+		return false
+	}
 	var te *transport.Error
 	if errors.As(err, &te) {
 		return te.StatusCode == http.StatusRequestTimeout || te.StatusCode == http.StatusTooManyRequests || te.StatusCode >= 500
@@ -549,4 +579,27 @@ func indexTar(file string) (open func(name string) (io.ReadCloser, error), close
 		}
 		return io.NopCloser(io.NewSectionReader(f, s.off, s.size)), nil
 	}, f.Close, nil
+}
+
+// httpsOnly sends nothing over plain http but to a loopback address;
+// localhost is a name and may resolve elsewhere. ggcr asks for http on its
+// own: for a private address or a .local name whose https ping failed, and
+// for a token realm the registry names. Those go over https instead, so the
+// https answer decides, and a redirect to http is refused.
+type httpsOnly struct{ next http.RoundTripper }
+
+func (h httpsOnly) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" {
+		return h.next.RoundTrip(req)
+	}
+	if ip := net.ParseIP(req.URL.Hostname()); ip != nil && ip.IsLoopback() {
+		return h.next.RoundTrip(req)
+	}
+	if req.Response != nil {
+		return nil, errors.Wrapf(ErrInsecureRegistry, "redirect to %s; --insecure-registry allows it", req.URL.Redacted())
+	}
+	req = req.Clone(req.Context())
+	req.URL.Scheme = "https"
+	resp, err := h.next.RoundTrip(req)
+	return resp, errors.Wrap(err, "sent over https")
 }

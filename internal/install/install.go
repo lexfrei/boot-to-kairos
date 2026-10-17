@@ -43,6 +43,8 @@ type Options struct {
 	KeepNetwork bool
 	// DryRun stops before the point of no return and prints the plan.
 	DryRun bool
+	// InsecureRegistry allows plain http to a registry on another machine.
+	InsecureRegistry bool
 	// Output is OutputText or OutputJSON; empty means text.
 	Output string
 }
@@ -556,7 +558,7 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	if err := unix.Mount("tmpfs", root, "tmpfs", 0, fmt.Sprintf("mode=0755,size=%d", budget)); err != nil {
 		return "", errors.Wrap(err, "mount rootfs tmpfs")
 	}
-	if err := unpack(ctx, o.Image, root, budget, plan); err != nil {
+	if err := unpack(ctx, o, root, budget, plan); err != nil {
 		return "", err
 	}
 	var st unix.Statfs_t
@@ -620,9 +622,9 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 
 // unpack fetches the image into root, staging each layer on the work
 // tmpfs, outside the image's root.
-func unpack(ctx context.Context, ref, root string, budget uint64, plan *Plan) error {
-	log.Printf("fetching %s", ref)
-	img, err := image.Open(ctx, ref, "linux/"+runtime.GOARCH)
+func unpack(ctx context.Context, o Options, root string, budget uint64, plan *Plan) error {
+	log.Printf("fetching %s", o.Image)
+	img, err := image.Open(ctx, o.Image, "linux/"+runtime.GOARCH, o.InsecureRegistry)
 	if err != nil {
 		return err
 	}

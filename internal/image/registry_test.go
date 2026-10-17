@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,6 +25,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"golang.org/x/sys/unix"
 )
 
 // faultyRegistry serves img from an in-process registry and lets fault
@@ -83,7 +85,7 @@ func cut(w http.ResponseWriter, body []byte) {
 
 func pullAndExtract(t *testing.T, ctx context.Context, ref string) (string, error) {
 	t.Helper()
-	img, err := Open(ctx, ref, "linux/"+runtime.GOARCH)
+	img, err := Open(ctx, ref, "linux/"+runtime.GOARCH, false)
 	if err != nil {
 		return "", err
 	}
@@ -107,7 +109,7 @@ func TestPullRetriesALayerStreamThatBreaks(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertInstalled(t, dest)
-	if img, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH); err != nil || img.Transport() != "registry" {
+	if img, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH, false); err != nil || img.Transport() != "registry" {
 		t.Fatalf("transport of %s: %v", ref, err)
 	}
 	if n := gets.Load(); n != 3 {
@@ -272,7 +274,7 @@ func TestPullStopsRetryingWhenCancelled(t *testing.T) {
 func TestPullRefusesASingleManifestForAnotherArchitecture(t *testing.T) {
 	img := platformImage(t, "s390x", layer(t, entry{name: "f", typ: tar.TypeReg, body: "x"}))
 	ref, _ := faultyRegistry(t, img, "/none", func(http.ResponseWriter, []byte) bool { return false })
-	if _, err := Open(t.Context(), ref, "linux/amd64"); !errors.Is(err, ErrPlatform) {
+	if _, err := Open(t.Context(), ref, "linux/amd64", false); !errors.Is(err, ErrPlatform) {
 		t.Fatalf("err = %v, want ErrPlatform", err)
 	}
 }
@@ -284,7 +286,7 @@ func TestPullReadsTheMediaTypeFromAGenericContentType(t *testing.T) {
 		_, _ = w.Write(body)
 		return true
 	})
-	if _, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH); err != nil {
+	if _, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH, false); err != nil {
 		t.Fatalf("a manifest served as application/octet-stream: %v", err)
 	}
 }
@@ -296,7 +298,7 @@ func TestPullRefusesAnUnsupportedManifestType(t *testing.T) {
 		_, _ = w.Write([]byte(`{"schemaVersion":1,"name":"kairos/hadron","fsLayers":[]}`))
 		return true
 	})
-	if _, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH); err == nil || !strings.Contains(err.Error(), "unsupported media type") {
+	if _, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH, false); err == nil || !strings.Contains(err.Error(), "unsupported media type") {
 		t.Fatalf("err = %v, want the media type refused rather than read as an index", err)
 	}
 }
@@ -391,7 +393,7 @@ func TestPullRetriesAStalledManifest(t *testing.T) {
 		return true
 	})
 	t.Cleanup(func() { close(release) })
-	if _, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH); err != nil {
+	if _, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH, false); err != nil {
 		t.Fatalf("err = %v: a manifest that never comes must be asked for again", err)
 	}
 	if n := gets.Load(); n != 2 {
@@ -411,5 +413,175 @@ func TestACertificateErrorIsNotRetried(t *testing.T) {
 	}
 	if !(registrySource{}).transient(&url.Error{Op: "Get", URL: "https://registry.example/v2/", Err: io.ErrUnexpectedEOF}) {
 		t.Error("a broken connection is not retried")
+	}
+}
+
+type recordingTransport struct{ sent []string }
+
+func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.sent = append(r.sent, req.URL.String())
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+}
+
+// Over plain http anyone on the path can answer the tag with a manifest of
+// their own, and every digest checked after comes from it.
+func TestPlainHTTPGoesOnlyToALoopbackAddress(t *testing.T) {
+	for _, tc := range []struct {
+		url, sent string // sent "" is refused when redirected to
+	}{
+		{"http://10.0.0.5:5000/v2/", "https://10.0.0.5:5000/v2/"},
+		{"http://172.16.0.1/v2/", "https://172.16.0.1/v2/"},
+		{"http://192.168.1.10:5000/v2/", "https://192.168.1.10:5000/v2/"},
+		{"http://registry.local/v2/", "https://registry.local/v2/"},
+		{"http://127.0.0.1.nip.io/v2/", "https://127.0.0.1.nip.io/v2/"},
+		{"http://localhost:5000/v2/", "https://localhost:5000/v2/"},
+		{"http://[fe80::1]:5000/v2/", "https://[fe80::1]:5000/v2/"},
+		{"http://auth.example.com/token?scope=x", "https://auth.example.com/token?scope=x"},
+		{"http://127.0.0.1:5000/v2/", "http://127.0.0.1:5000/v2/"},
+		{"http://127.0.0.2/v2/", "http://127.0.0.2/v2/"},
+		{"http://[::1]:5000/v2/", "http://[::1]:5000/v2/"},
+		{"http://[::ffff:127.0.0.1]:5000/v2/", "http://[::ffff:127.0.0.1]:5000/v2/"},
+		{"https://10.0.0.5:5000/v2/", "https://10.0.0.5:5000/v2/"},
+		{"https://quay.io/v2/", "https://quay.io/v2/"},
+	} {
+		for _, redirected := range []bool{false, true} {
+			next := &recordingTransport{}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tc.url, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if redirected {
+				req.Response = &http.Response{StatusCode: http.StatusTemporaryRedirect}
+			}
+			resp, err := httpsOnly{next}.RoundTrip(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			plainRefused := redirected && strings.HasPrefix(tc.url, "http:") && !strings.HasPrefix(tc.sent, "http:")
+			switch {
+			case plainRefused && (!errors.Is(err, ErrInsecureRegistry) || len(next.sent) != 0):
+				t.Errorf("redirect to %s: err = %v, sent %v, want ErrInsecureRegistry and nothing sent", tc.url, err, next.sent)
+			case !plainRefused && (err != nil || len(next.sent) != 1 || next.sent[0] != tc.sent):
+				t.Errorf("%s (redirect %v): err = %v, sent %v, want %s", tc.url, redirected, err, next.sent, tc.sent)
+			case req.URL.String() != tc.url:
+				t.Errorf("%s: the caller's request was changed to %s", tc.url, req.URL)
+			}
+		}
+	}
+}
+
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, unix.ECONNREFUSED
+}
+
+// The client reports the URL it asked for, which is http.
+func TestAnUpgradedRequestSaysItWentOverHTTPS(t *testing.T) {
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://10.0.0.5:5000/v2/", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := httpsOnly{failingTransport{}}.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, unix.ECONNREFUSED) || !strings.Contains(err.Error(), "sent over https") {
+		t.Fatalf("err = %v, want the failure, saying it was sent over https", err)
+	}
+}
+
+// A registry may itself switch to plain http with a redirect; localhost is
+// a name, which DNS may resolve elsewhere.
+func TestPullRefusesARedirectToPlainHTTP(t *testing.T) {
+	for _, insecure := range []bool{false, true} {
+		img, _ := twoLayers(t)
+		var ref string
+		var redirects atomic.Int32
+		ref, _ = faultyRegistry(t, img, "/manifests/"+tag, func(w http.ResponseWriter, _ []byte) bool {
+			if redirects.Add(1) > 1 {
+				return false
+			}
+			_, port, err := net.SplitHostPort(strings.SplitN(ref, "/", 2)[0])
+			if err != nil {
+				t.Error(err)
+			}
+			w.Header().Set("Location", "http://localhost:"+port+"/v2/kairos/hadron/manifests/"+tag)
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			return true
+		})
+		got, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH, insecure)
+		switch {
+		case !insecure && !errors.Is(err, ErrInsecureRegistry):
+			t.Errorf("without --insecure-registry: err = %v, want ErrInsecureRegistry", err)
+		case !insecure && redirects.Load() != 1:
+			t.Errorf("without --insecure-registry: %d GETs of the manifest, want 1: the refusal is not retried", redirects.Load())
+		case insecure && err != nil:
+			t.Errorf("with --insecure-registry: %v", err)
+		case insecure && got.Transport() != "registry, plain http allowed":
+			t.Errorf("with --insecure-registry: transport %q, want plain http allowed", got.Transport())
+		}
+	}
+}
+
+func TestInsecureRegistryLetsTheClientFallBackToHTTP(t *testing.T) {
+	for _, ref := range []string{"10.0.0.5:5000/kairos/hadron:v1", "quay.io/kairos/hadron:v1"} {
+		src, err := openSource(ref, false)
+		if err != nil || src.transport() != "registry" {
+			t.Errorf("%s: transport %v, %v, want registry", ref, src, err)
+		}
+		src, err = openSource(ref, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := src.(registrySource).ref.Context().Scheme(); s != "http" || src.transport() != "registry, plain http allowed" {
+			t.Errorf("%s with --insecure-registry: scheme %s, transport %q, want http allowed and said", ref, s, src.transport())
+		}
+	}
+}
+
+// For a private address ggcr follows a failed https ping with an http one
+// at once; asked over https instead, it is as good as a retry, and the
+// https error, not the refusal, decides whether to try again.
+func TestPullRetriesAPrivateRegistryOverHTTPS(t *testing.T) {
+	savedDelay, savedTransport := retryDelay, registryTransport
+	t.Cleanup(func() { retryDelay, registryTransport = savedDelay, savedTransport })
+	retryDelay = 0
+	img, _ := twoLayers(t)
+	inner := registry.New(registry.Logger(log.New(io.Discard, "", 0)))
+	plain := httptest.NewServer(inner)
+	t.Cleanup(plain.Close)
+	r, err := name.ParseReference(strings.TrimPrefix(plain.URL, "http://") + "/kairos/hadron:" + tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(r, img); err != nil {
+		t.Fatal(err)
+	}
+	var pings atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" && pings.Add(1) <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	tr := srv.Client().Transport.(*http.Transport).Clone()
+	tr.TLSClientConfig.ServerName = "example.com"
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	}
+	registryTransport = tr
+	var logged bytes.Buffer
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
+	dest, err := pullAndExtract(t, t.Context(), "10.0.0.5:5000/kairos/hadron:"+tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstalled(t, dest)
+	if !strings.Contains(logged.String(), "attempt 1 of 5: GET https://10.0.0.5:5000/v2/: unexpected status code 503 Service Unavailable; GET https://10.0.0.5:5000/v2/: unexpected status code 503 Service Unavailable; retrying") {
+		t.Fatalf("log %q, want the first attempt to fail on both pings over https and be retried", logged.String())
 	}
 }

@@ -48,7 +48,7 @@ func testImage(t *testing.T, layers ...[]byte) *Image {
 	t.Helper()
 	dir := t.TempDir()
 	writeLayout(t, dir, platformImage(t, runtime.GOARCH, layers...))
-	img, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH)
+	img, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -209,7 +209,7 @@ func TestOpenReadsALayoutDirectoryAndArchive(t *testing.T) {
 		{"oci-archive:" + tarDir(t, dir, "./"), "OCI image archive"},
 	} {
 		t.Run(tc.ref[:strings.Index(tc.ref, ":")], func(t *testing.T) {
-			got, err := Open(t.Context(), tc.ref, "linux/"+runtime.GOARCH)
+			got, err := Open(t.Context(), tc.ref, "linux/"+runtime.GOARCH, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -233,7 +233,7 @@ func TestATamperedLayerIsRefusedBeforeItIsApplied(t *testing.T) {
 	defer log.SetOutput(log.Writer())
 	log.SetOutput(&logged)
 	for _, ref := range []string{"oci:" + dir, "oci-archive:" + tarDir(t, dir, "")} {
-		got, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH)
+		got, err := Open(t.Context(), ref, "linux/"+runtime.GOARCH, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestATruncatedLayerIsRefused(t *testing.T) {
 	if err := os.WriteFile(p, b[:len(b)-1], 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH)
+	got, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestATamperedManifestOrConfigIsRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			flipByte(t, blobPath(dir, h))
-			if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH); !errors.Is(err, ErrMismatch) {
+			if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); !errors.Is(err, ErrMismatch) {
 				t.Fatalf("err = %v, want ErrMismatch", err)
 			}
 		})
@@ -296,7 +296,7 @@ func TestOpenPicksTheRequestedArchitecture(t *testing.T) {
 	})
 	for _, ref := range []string{"oci:" + dir, "oci-archive:" + tarDir(t, dir, "")} {
 		for _, arch := range []string{"amd64", "arm64"} {
-			img, err := Open(t.Context(), ref, "linux/"+arch)
+			img, err := Open(t.Context(), ref, "linux/"+arch, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -314,13 +314,13 @@ func TestOpenPicksTheRequestedArchitecture(t *testing.T) {
 func TestOpenRefusesAnImageForAnotherArchitecture(t *testing.T) {
 	dir := t.TempDir()
 	multiArch(t, dir, map[string]v1.Image{"s390x": platformImage(t, "s390x")})
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/amd64"); !errors.Is(err, ErrPlatform) {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/amd64", false); !errors.Is(err, ErrPlatform) {
 		t.Fatalf("index without the platform: err = %v, want ErrPlatform", err)
 	}
 	// A single manifest names its platform only in the config.
 	dir = t.TempDir()
 	writeLayout(t, dir, platformImage(t, "arm64"))
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/amd64"); !errors.Is(err, ErrPlatform) {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/amd64", false); !errors.Is(err, ErrPlatform) {
 		t.Fatalf("single arm64 manifest: err = %v, want ErrPlatform", err)
 	}
 }
@@ -338,7 +338,7 @@ func TestOpenRefusesAnImageForAnotherOS(t *testing.T) {
 	}
 	dir := t.TempDir()
 	writeLayout(t, dir, img)
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH); !errors.Is(err, ErrPlatform) {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); !errors.Is(err, ErrPlatform) {
 		t.Fatalf("err = %v, want ErrPlatform", err)
 	}
 }
@@ -360,7 +360,7 @@ func TestOpenBoundsNestedIndexes(t *testing.T) {
 		if err := p.AppendIndex(idx); err != nil {
 			t.Fatal(err)
 		}
-		_, err = Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH)
+		_, err = Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false)
 		if (err == nil) != tc.ok {
 			t.Fatalf("%d nested indexes: err = %v", tc.depth, err)
 		}
@@ -444,7 +444,7 @@ func TestAnOversizedManifestIsNotRead(t *testing.T) {
 func TestOpenRefusesALayoutHoldingSeveralImages(t *testing.T) {
 	dir := t.TempDir()
 	writeLayout(t, dir, platformImage(t, runtime.GOARCH), platformImage(t, runtime.GOARCH, layer(t)))
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH); !errors.Is(err, ErrAmbiguous) {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("err = %v, want ErrAmbiguous", err)
 	}
 }
@@ -454,7 +454,7 @@ func TestOpenRefusesALegacyDockerArchive(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`[{"Config":"c.json","Layers":["l/layer.tar"]}]`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Open(t.Context(), "oci-archive:"+tarDir(t, dir, ""), "linux/amd64")
+	_, err := Open(t.Context(), "oci-archive:"+tarDir(t, dir, ""), "linux/amd64", false)
 	if !errors.Is(err, ErrLegacyDockerArchive) || !strings.Contains(err.Error(), "skopeo copy") {
 		t.Fatalf("err = %v, want ErrLegacyDockerArchive with how to convert it", err)
 	}
@@ -476,14 +476,14 @@ func TestOpenRefusesAMalformedDigest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "index.json"), b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/amd64"); err == nil || !strings.Contains(err.Error(), "non-hex") {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/amd64", false); err == nil || !strings.Contains(err.Error(), "non-hex") {
 		t.Fatalf("err = %v, want the digest refused as malformed", err)
 	}
 }
 
 func TestOpenRefusesAMissingLayout(t *testing.T) {
 	for _, ref := range []string{"oci:" + t.TempDir(), "oci-archive:" + filepath.Join(t.TempDir(), "none.tar")} {
-		if _, err := Open(t.Context(), ref, "linux/amd64"); err == nil {
+		if _, err := Open(t.Context(), ref, "linux/amd64", false); err == nil {
 			t.Fatalf("%s: opened an image that is not there", ref)
 		}
 	}
@@ -493,7 +493,7 @@ var errFull = errors.New("full")
 
 func TestExtractAsksBeforeFetchingEachLayer(t *testing.T) {
 	img, dir := twoLayers(t)
-	got, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH)
+	got, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +539,7 @@ func TestOpenSkipsAnUnlabelledImageForAnotherArchitecture(t *testing.T) {
 	writeLayout(t, flat, amd, arm)
 	for _, dir := range []string{nested, flat} {
 		for _, arch := range []string{"amd64", "arm64"} {
-			img, err := Open(t.Context(), "oci:"+dir, "linux/"+arch)
+			img, err := Open(t.Context(), "oci:"+dir, "linux/"+arch, false)
 			if err != nil {
 				t.Fatalf("%s for linux/%s: %v", dir, arch, err)
 			}
@@ -558,7 +558,7 @@ func TestOpenCountsAnImageListedTwiceOnce(t *testing.T) {
 	img, _ := twoLayers(t)
 	dir := t.TempDir()
 	writeLayout(t, dir, img, img)
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH); err != nil {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); err != nil {
 		t.Fatalf("one image under two names: %v", err)
 	}
 }
@@ -596,7 +596,7 @@ func TestAnIndexWithNoImagesSaysSo(t *testing.T) {
 
 func TestCloseReleasesTheArchive(t *testing.T) {
 	_, dir := twoLayers(t)
-	img, err := Open(t.Context(), "oci-archive:"+tarDir(t, dir, ""), "linux/"+runtime.GOARCH)
+	img, err := Open(t.Context(), "oci-archive:"+tarDir(t, dir, ""), "linux/"+runtime.GOARCH, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func TestOpenCountsAManifestReachedTwiceOnce(t *testing.T) {
 	if err := p.AppendIndex(idx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH); err != nil {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); err != nil {
 		t.Fatalf("one manifest, named directly and through an index: %v", err)
 	}
 }

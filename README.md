@@ -106,6 +106,8 @@ A local image is checked like a pulled one: the manifest, the config and every l
 
 From a registry each layer is downloaded whole, checked, then unpacked. A download that breaks off, receives nothing for a minute, gets a 5xx, 408 or 429 answer, or does not match its digest is tried again, five attempts in all, waiting 1, 2, 4 and 8 seconds in between. Any other answer, such as not found or unauthorized, stops the install at once, and so does a certificate the machine does not accept. A pull-through cache that sends nothing of a layer until it has fetched the layer itself must start sending within that minute, or the attempt is counted as stalled.
 
+Nothing goes to a registry over plain http unless it is at a loopback address such as `127.0.0.1:5000`; `localhost` is a name, which DNS may resolve elsewhere. Over plain http anyone on the path could hand over another manifest for the tag, and every digest checked after comes from it. Where the client would fall back to http, for a registry at a private address or under a `.local` name, or fetch a token from an http URL, it asks over https instead, so a private registry with a certificate the machine accepts works as usual and one without it fails like any https error. A redirect to plain http is refused, including one for a layer. `--insecure-registry` allows plain http to any registry, and the plan's image source then says so.
+
 ## Network
 
 Kairos brings every Ethernet NIC up with DHCP by default. A machine reachable only at a static address, or only through a bond, a VLAN or a bridge, would not come back on the network after the reboot, so boot-to-kairos carries the running system's network configuration over, unless you pass `--keep-network=false`.
