@@ -240,7 +240,7 @@ func unformatted(fs string) bool {
 func parseConfig(cfg []byte) (top, install map[string]any, err error) {
 	var doc any
 	if err := yaml.Unmarshal(cfg, &doc); err != nil {
-		return nil, nil, errors.Wrap(err, "parse cloud-config")
+		return nil, nil, errors.Mark(errors.Wrap(err, "parse cloud-config"), ErrBadConfig)
 	}
 	install = map[string]any{}
 	if doc == nil {
@@ -248,7 +248,7 @@ func parseConfig(cfg []byte) (top, install map[string]any, err error) {
 	}
 	top, ok := stringMap(doc)
 	if !ok {
-		return nil, nil, errors.New("the cloud-config is not a mapping")
+		return nil, nil, errors.Mark(errors.New("the cloud-config is not a mapping"), ErrBadConfig)
 	}
 	for k := range top {
 		lower := strings.ToLower(k)
@@ -308,7 +308,10 @@ func redecode(view map[string]any, out any) error {
 	if err != nil {
 		return errors.Wrap(err, "re-encode cloud-config")
 	}
-	return errors.Wrap(yaml.Unmarshal(b, out), "parse cloud-config")
+	if err := yaml.Unmarshal(b, out); err != nil {
+		return errors.Mark(errors.Wrap(err, "parse cloud-config"), ErrBadConfig)
+	}
+	return nil
 }
 
 // udevEscape spells name the way udev names its by-label and by-partlabel

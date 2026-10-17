@@ -57,7 +57,7 @@ var (
 	ErrMissingDisk     = errors.New("--disk is required")
 	ErrMissingConfig   = errors.New("--cloud-config is required")
 	ErrNotWholeDisk    = errors.New("--disk must be a whole disk")
-	ErrBadConfig       = errors.New("--cloud-config is not a cloud-config")
+	ErrBadConfig       = kairos.ErrBadConfig
 	ErrBIOSUnsupported = errors.New("legacy BIOS boot is not supported")
 	ErrAborted         = errors.New("aborted by user")
 	ErrBadOutput       = errors.New("--output must be text or json")
