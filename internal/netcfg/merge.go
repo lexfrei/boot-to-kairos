@@ -66,6 +66,9 @@ func Inject(cfg []byte, files []File) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if root.Kind == yaml.ScalarNode && root.ShortTag() == "!!null" {
+		root = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	}
 	doc.Content[0] = root
 	if root.Kind != yaml.MappingNode {
 		return nil, errors.New("the cloud-config is not a mapping")

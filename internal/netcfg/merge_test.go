@@ -108,10 +108,13 @@ stages:
 	}
 }
 
+// The agent reads a null document as an empty config.
 func TestInjectIntoAnEmptyConfig(t *testing.T) {
-	c := inject(t, "#cloud-config\n")
-	if len(c.Stages["initramfs"]) != 1 {
-		t.Errorf("stages = %+v", c.Stages)
+	for _, cfg := range []string{"#cloud-config\n", "#cloud-config\n---\n", "#cloud-config\n~\n", "#cloud-config\n--- !!null\n"} {
+		c := inject(t, cfg)
+		if len(c.Stages["initramfs"]) != 1 {
+			t.Errorf("%q: stages = %+v", cfg, c.Stages)
+		}
 	}
 }
 
@@ -230,6 +233,7 @@ func TestInjectRefusesWhatItCannotExtend(t *testing.T) {
 		"#cloud-config\nstages: none\n",
 		"#cloud-config\nstages:\n  initramfs: none\n",
 		"#cloud-config\n- a list\n",
+		"#cloud-config\na scalar\n",
 		"#cloud-config\n<<: 5\n",
 		"#cloud-config\na: &a [*a]\n",
 		"#cloud-config\na: &a {<<: *a}\n",
