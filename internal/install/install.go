@@ -32,6 +32,7 @@ import (
 	"github.com/lexfrei/boot-to-kairos/internal/netcfg"
 	"github.com/lexfrei/boot-to-kairos/internal/quiesce"
 	"github.com/lexfrei/boot-to-kairos/internal/sandbox"
+	"github.com/lexfrei/boot-to-kairos/internal/secureboot"
 )
 
 // Options are the user's choices.
@@ -56,6 +57,7 @@ type Options struct {
 	WorkDir string
 
 	work *dataDir
+	sb   *secureBoot
 }
 
 const (
@@ -219,7 +221,11 @@ func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err := checkFirmware(cfg, "/sys", runtime.GOARCH, o.Disk, flash.SectorSize); err != nil {
+	firmware, err := checkFirmware(cfg, "/sys", runtime.GOARCH, o.Disk, flash.SectorSize)
+	if err != nil {
+		return err
+	}
+	if o.sb, err = readSecureBoot(firmware, efivars, legacyEFIVars, isEfivarfs); err != nil {
 		return err
 	}
 	clashes := append(kairos.LabelClashes("/dev/disk/by-partlabel", names), kairos.LabelClashes("/dev/disk/by-label", labels)...)
@@ -259,8 +265,6 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 			return err
 		}
 	}
-	warnSecureBoot()
-
 	raw, err := buildInterruptible(ctx, o, cfg, plan)
 	if err != nil {
 		return err
@@ -669,15 +673,9 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	}
 
 	raw := filepath.Join(data, "image.raw")
-	f, err := os.Create(raw)
-	if err != nil {
-		return "", errors.Wrap(err, "create image file")
+	if err := createSparse(raw, size); err != nil {
+		return "", err
 	}
-	if err := f.Truncate(size); err != nil {
-		f.Close()
-		return "", errors.Wrap(err, "size image file")
-	}
-	f.Close()
 
 	dev, err := loop.Attach(raw, sector)
 	if err != nil {
@@ -698,6 +696,12 @@ func build(ctx context.Context, o Options, cfg []byte, plan *Plan) (string, erro
 	}
 	if runErr != nil {
 		return "", runErr
+	}
+	readESP := func() (secureboot.Chain, error) {
+		return readChain(dev.Path, sector, root, filepath.Join(workDir, "esp"))
+	}
+	if err := checkSecureBoot(o.sb, readESP, plan); err != nil {
+		return "", err
 	}
 	if err := dev.Detach(); err != nil {
 		return "", err
@@ -747,6 +751,16 @@ func sizeForDisk(root, data string, budget, rootfsUsed uint64, disk int64) error
 		return err
 	}
 	return errors.Wrap(unix.Mount("", root, "", unix.MS_REMOUNT, fmt.Sprintf("size=%d", rootfsSize)), "shrink rootfs tmpfs")
+}
+
+// createSparse creates the image file, a hole of size bytes.
+func createSparse(path string, size int64) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return errors.Wrap(err, "create image file")
+	}
+	defer f.Close()
+	return errors.Wrap(f.Truncate(size), "size image file")
 }
 
 // syncFile flushes the file at path.
@@ -831,14 +845,6 @@ func confirm(ctx context.Context, in io.Reader, out io.Writer, o Options) error 
 			return ErrAborted
 		}
 		return nil
-	}
-}
-
-func warnSecureBoot() {
-	// SecureBoot-<EFI global variable GUID>: 4 attribute bytes, then the value.
-	b, err := os.ReadFile("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c")
-	if err == nil && len(b) == 5 && b[4] == 1 {
-		log.Print("warning: Secure Boot is on; the image's boot chain must be trusted by this firmware or it will not boot")
 	}
 }
 
@@ -1133,6 +1139,7 @@ var errorClasses = []struct {
 	{kairos.ErrUncheckable, "bad-config"},
 	{ErrBIOSUnsupported, "bios-unsupported"},
 	{ErrLabelClash, "label-clash"},
+	{ErrSecureBoot, "secure-boot"},
 	{ErrAborted, "aborted"},
 	{ErrNotEnoughMemory, "not-enough-memory"},
 	{ErrNotEnoughSpace, "not-enough-space"},
