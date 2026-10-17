@@ -15,6 +15,8 @@ import (
 	"time"
 
 	cerrors "github.com/cockroachdb/errors"
+	"github.com/lexfrei/boot-to-kairos/internal/efiboot"
+	"github.com/lexfrei/boot-to-kairos/internal/flash"
 	"github.com/lexfrei/boot-to-kairos/internal/kairos"
 	"github.com/lexfrei/boot-to-kairos/internal/signature"
 )
@@ -275,9 +277,50 @@ func TestConfirmAcceptsTheDiskPath(t *testing.T) {
 	}
 }
 
+// The firmware reads the ESP whether or not a boot entry can be written:
+// without efivarfs it falls back to \EFI\BOOT on the same partition.
+func TestBootEntryRefusesAnESPTheFirmwareCannotRead(t *testing.T) {
+	const disk = "/dev/vda"
+	var gotRaw string
+	var gotSector int
+	checkESP = func(raw string, sector int) error {
+		gotRaw, gotSector = raw, sector
+		return cerrors.Mark(cerrors.New("FAT32 with 8317 clusters"), efiboot.ErrESPUnreadable)
+	}
+	sectorSize = func(string) (int, error) { return 4096, nil }
+	t.Cleanup(func() { checkESP, sectorSize = efiboot.CheckESP, flash.SectorSize })
+	summary := &Plan{}
+	plan, err := bootEntry(fakeSys(t, true), "/run/image.raw", disk, summary)
+	if plan != nil || !cerrors.Is(err, efiboot.ErrESPUnreadable) || errorClass(err) != "bad-image" {
+		t.Fatalf("bootEntry = %v, %v (class %s), want the refusal", plan, err, errorClass(err))
+	}
+	if gotRaw != "/run/image.raw" || gotSector != 4096 {
+		t.Fatalf("checked %q with %d-byte sectors, want the image with the disk's", gotRaw, gotSector)
+	}
+	if !strings.Contains(err.Error(), "would not boot") || strings.Count(err.Error(), "EFI system partition") != 1 {
+		t.Fatalf("the refusal does not say once what it prevents: %v", err)
+	}
+	// An image the check cannot read is not blamed on the firmware.
+	checkESP = func(string, int) error { return cerrors.New("the image has no EFI system partition") }
+	if _, err := bootEntry(fakeSys(t, true), "/run/image.raw", disk, &Plan{}); err == nil || errorClass(err) != "error" || strings.Contains(err.Error(), "would not boot") {
+		t.Fatalf("an unreadable image gave %v (class %s)", err, errorClass(err))
+	}
+	// The efivarfs looked for is the one under the sysfs given, which here
+	// has none, whatever the host running the test has.
+	checkESP = func(string, int) error { return nil }
+	if plan, err := bootEntry(fakeSys(t, true), "/run/image.raw", disk, &Plan{}); plan != nil || err != nil {
+		t.Fatalf("without efivarfs bootEntry = %v, %v, want no entry and no error", plan, err)
+	}
+	// On legacy BIOS the firmware does not read the ESP.
+	checkESP = func(string, int) error { t.Fatal("ESP checked on legacy BIOS"); return nil }
+	if _, err := bootEntry(fakeSys(t, false), "/run/image.raw", disk, &Plan{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBootEntryNamesUEFI(t *testing.T) {
 	summary := &Plan{}
-	// Past the mode, the outcome depends on this host's efivarfs.
+	// Past the mode the disk cannot be read; the plan names the mode first.
 	_, _ = bootEntry(fakeSys(t, true), "/nonexistent/image.raw", "/nonexistent/disk", summary)
 	var out strings.Builder
 	summary.Print(&out)
