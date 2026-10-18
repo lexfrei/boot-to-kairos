@@ -1,0 +1,25 @@
+# Tested
+
+Every run starts from the same baseline unless its row says otherwise. The baseline is an Ubuntu 24.04 cloud image on QEMU with OVMF (UEFI, Secure Boot off), a 20 GiB virtio disk and an active swap file on the root filesystem. The target is `quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0`, which is Hadron v0.5.1 with Kairos v4.3.0. "Active boot" means Kairos came up in active boot on the first reboot.
+
+| Configuration | Outcome |
+| --- | --- |
+| Baseline | Active boot. The SSH key from the cloud-config was accepted |
+| SeaBIOS, legacy BIOS | Active boot in legacy BIOS mode, from a disk with a `bios_grub` partition. The SSH key was accepted |
+| Network carried, DHCP off. One NIC at a static address, renamed `lan0`, with an extra route, MTU 1400, a nameserver and a search domain. An active-backup bond of two NICs at a static address. SSH reached the VM only at the static address | Kairos came back at that address. The NIC was found by its MAC under its new name, the bond kept its mode, primary port and MII interval, and the routes, MTU and DNS were in place |
+| Installed from an `oci-archive:` made with `skopeo copy --all`. Only SSH could reach the VM, and connections out of it, by name or by address, failed before the install | Active boot |
+| Identity carried, cloud-config without any SSH key | Old hostname, same ed25519 and RSA host key fingerprints. `ubuntu` logged in with its old key under strict host key checking against the `known_hosts` taken before the install. With only root holding a key and no cloud-config, the same key logged in as `kairos` |
+| 6 GiB VM, `--workdir` on ext4 on a second virtio disk | Shmem peaked at 329 MiB. The disk image took 1483 MiB of the second disk, and nothing was left on it after the reboot. Active boot. `--workdir` on the target's root filesystem and on vfat on the second disk were refused before anything was downloaded |
+| arm64: QEMU `virt` with AAVMF, 4 GiB RAM, CPU emulated under TCG on an arm64 host without KVM. Target `quay.io/kairos/hadron:v0.5.1-core-arm64-generic-v4.3.0` | The dry run passed and left the disk as it was. Active boot, `uname -m` reported `aarch64`, and the firmware booted the `Kairos` entry, which loads `\EFI\BOOT\BOOTAA64.EFI`. The timings say nothing about real hardware |
+| Secure Boot on with Microsoft's keys (`OVMF_CODE_4M.secboot.fd` and `OVMF_VARS_4M.ms.fd`), 6 GiB VM | Hadron was refused with `secure-boot` in the dry run and in the real run, as its `BOOTX64.EFI` is unsigned. The first 64 MiB of the disk read back unchanged |
+| Same, with an Ubuntu 24.04 image built with kairos-init v4.3.0, from an `oci-archive:`, `--workdir` on a second disk and `--keep-identity=false` (the image has its own `ubuntu` user) | The check passed: the shim chains to the Microsoft Corporation UEFI CA 2011 in db, GRUB and the kernel to Canonical's certificate in the shim. Active boot with Secure Boot on |
+| Signature verified | The plan named the signature. Active boot |
+| Dry runs against a registry on the VM | Each refused before any layer was downloaded, with the disk left as it was: v4.2.0 with its own signature under the v4.3.0 tag (`bad-signature`), v4.3.0 with a layer added (`no-signature`), and that image with v4.3.0's signature bundle attached (`bad-signature`). A copy of v4.3.0 with its signature was accepted |
+| Signature checks with the VM's network closed | An `oras copy --recursive` archive verified with `--trusted-root` and failed without it. A `skopeo copy` archive was refused as unsigned and accepted with `--verify-signature=false` |
+| NVMe disk on QEMU's NVMe controller, 512-byte sectors | Active boot |
+| Root on LVM. The ESP and an ext4 `/boot` on partitions, the root filesystem and a 1 GiB swap volume on linear logical volumes over the third partition | The swap volume and the swap file were both turned off. Active boot |
+| Root on LUKS2 over the third partition, opened from the initramfs with a key file | Active boot |
+| Root on LUKS1, whose dm-crypt table carries the key itself | The installer was left waiting at its prompt after it had read that table. A scan of its memory found no copy of the key, while the same scan found the SSH key of the cloud-config it had read |
+| Debian 12, once with netplan and systemd-networkd and once with ifupdown and dhclient. Rocky Linux 9 with NetworkManager, SELinux enforcing and XFS. A static address, a default and an extra route, MTU 1400, a nameserver and a search domain on one NIC, DHCP on a second | Kairos came back with the first NIC as configured and the second on DHCP. The old user logged in under strict host key checking |
+
+arm64 is tested only by hand, see [CI and releases](ci-and-releases.md).
