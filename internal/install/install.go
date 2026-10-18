@@ -1216,6 +1216,7 @@ var errorClasses = []struct {
 	{image.ErrPlatform, "bad-image"},
 	{efiboot.ErrESPUnreadable, "bad-image"},
 	{image.ErrMismatch, "bad-image"},
+	{image.ErrUnsupportedDigest, "bad-image"},
 	{image.ErrAmbiguous, "bad-image"},
 	{image.ErrLegacyDockerArchive, "bad-image"},
 	{image.ErrInsecureRegistry, "bad-image"},

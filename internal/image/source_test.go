@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -647,8 +649,8 @@ func TestOpenCountsAManifestReachedTwiceOnce(t *testing.T) {
 	}
 }
 
-// fetchVerified computes only sha256 and relies on ggcr refusing a digest
-// that names another algorithm when it parses one.
+// fetchVerified computes only sha256, so a well-formed digest naming
+// another algorithm, which ggcr parses, must be refused here.
 func TestOpenRefusesADigestThatIsNotSHA256(t *testing.T) {
 	img, dir := twoLayers(t)
 	h, err := img.Digest()
@@ -659,22 +661,39 @@ func TestOpenRefusesADigestThatIsNotSHA256(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sum := sha512.Sum512(b)
+	hex512 := hex.EncodeToString(sum[:])
 	if err := os.MkdirAll(filepath.Join(dir, "blobs", "sha512"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "blobs", "sha512", h.Hex), b, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "blobs", "sha512", hex512), b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	idx, err := os.ReadFile(filepath.Join(dir, "index.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx = bytes.ReplaceAll(idx, []byte(h.String()), []byte("sha512:"+h.Hex))
+	idx = bytes.ReplaceAll(idx, []byte(h.String()), []byte("sha512:"+hex512))
 	if err := os.WriteFile(filepath.Join(dir, "index.json"), idx, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); err == nil || !strings.Contains(err.Error(), "unsupported hash") {
+	if _, err := Open(t.Context(), "oci:"+dir, "linux/"+runtime.GOARCH, false); !errors.Is(err, ErrUnsupportedDigest) {
 		t.Fatalf("err = %v, want the sha512 digest refused", err)
+	}
+}
+
+func TestADigestOfAnotherAlgorithmIsRefusedWithoutRetries(t *testing.T) {
+	saved := retryDelay
+	t.Cleanup(func() { retryDelay = saved })
+	retryDelay = 0
+	src := &fakeSource{body: []byte("blob"), retries: true}
+	d := &v1.Descriptor{Size: 4, Digest: v1.Hash{Algorithm: "sha512", Hex: strings.Repeat("0", 128)}}
+	_, err := fetchSmall(t.Context(), src, d)
+	if !errors.Is(err, ErrUnsupportedDigest) || strings.Contains(err.Error(), "attempts") || src.opens != 0 {
+		t.Fatalf("err = %v after %d opens, want a refusal before any fetch or retry", err, src.opens)
+	}
+	if _, err := stageBlob(t.Context(), src, d, t.TempDir()); !errors.Is(err, ErrUnsupportedDigest) || strings.Contains(err.Error(), "attempts") || src.opens != 0 {
+		t.Fatalf("stageBlob: err = %v after %d opens, want a refusal before any fetch or retry", err, src.opens)
 	}
 }
 

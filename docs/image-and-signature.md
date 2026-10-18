@@ -13,7 +13,7 @@ A reference after the path, as in skopeo's `oci:DIR:TAG`, is not supported: the 
 
 A local image is checked like a pulled one. Each of these refusals has class `bad-image`:
 
-- The manifest, the config and every layer must match the digests the index names. Otherwise the install stops before that layer is applied.
+- The manifest, the config and every layer must match the digests the index names. Otherwise the install stops before that layer is applied. A manifest, config or layer that an index or manifest names by a sha512 digest is refused too.
 - The host's architecture is picked from a multi-architecture index, and the image's config must name it too. So an image for another architecture is refused before any layer is downloaded.
 - A layout holding more than one image for the host's architecture is refused rather than guessed. So is a layout with an image that cannot be read, if that image is for the host's architecture or names no platform. Copy the image you want into a layout of its own.
 

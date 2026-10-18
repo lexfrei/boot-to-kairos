@@ -7,3 +7,5 @@ An end-to-end job boots a throwaway Ubuntu VM with an active swap file on the ru
 The identity carry-over is not booted in CI. The VM's own user would come back with it and hide an account the seed made. The runs under [Tested](tested.md) cover it. CI has no arm64 runner.
 
 Once all of that passes, the same run builds the release binaries and checks that they are static and report their version. On a pushed `v*` tag it then publishes them as a GitHub release, so nothing is published that the run did not test.
+
+Dependencies are kept current by Renovate through the shared preset in `.github/renovate.json`: Go modules, the Go toolchain, GitHub Action digests and the golangci-lint version pinned in the CI workflow. Each update arrives as a pull request that merges once this CI passes.
