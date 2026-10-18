@@ -421,14 +421,19 @@ func bootEntry(sysfs, raw, disk string, summary *Plan) (*efiboot.Plan, error) {
 		return nil, nil //nolint:nilnil // nothing to write is not an error
 	}
 	summary.Add("firmware", "UEFI")
-	if err := efiboot.Available(efivars); err != nil {
+	sector, err := sectorSize(disk)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkESP(raw, sector); errors.Is(err, efiboot.ErrESPUnreadable) {
+		return nil, errors.Wrapf(err, "UEFI firmware cannot read the EFI system partition the image's installer made for %d-byte sectors, so %s would not boot; nothing was written", sector, disk)
+	} else if err != nil {
+		return nil, errors.Wrap(err, "EFI system partition of the image; nothing was written")
+	}
+	if err := efiboot.Available(filepath.Join(sysfs, "firmware/efi/efivars")); err != nil {
 		log.Printf("warning: %v; no boot entry will be written, the firmware has to fall back to \\EFI\\BOOT on the disk", err)
 		summary.addBootEntry(disk, err, nil)
 		return nil, nil //nolint:nilnil // nothing to write is not an error
-	}
-	sector, err := flash.SectorSize(disk)
-	if err != nil {
-		return nil, err
 	}
 	plan, err := efiboot.NewPlan(raw, sector, runtime.GOARCH)
 	if err != nil {
@@ -488,6 +493,8 @@ var (
 		return bootEntry("/sys", raw, disk, summary)
 	}
 	applyBootEntry = writeBootEntry
+	checkESP       = efiboot.CheckESP
+	sectorSize     = flash.SectorSize
 )
 
 const writeAttempts = 3
@@ -1167,6 +1174,7 @@ var errorClasses = []struct {
 	{signature.ErrNoSignature, "no-signature"},
 	{signature.ErrBadSignature, "bad-signature"},
 	{image.ErrPlatform, "bad-image"},
+	{efiboot.ErrESPUnreadable, "bad-image"},
 	{image.ErrMismatch, "bad-image"},
 	{image.ErrAmbiguous, "bad-image"},
 	{image.ErrLegacyDockerArchive, "bad-image"},
