@@ -3,6 +3,7 @@ package netcfg
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,8 +56,10 @@ type planner struct {
 	// each link.
 	members, uppers map[int][]int
 	routes          map[int][]Route
-	carried         map[int]bool
-	notes           []string
+	// linkDNS are the link-local nameservers of each link.
+	linkDNS map[int][]netip.Addr
+	carried map[int]bool
+	notes   []string
 	// addrs and routeList say what the rendered files set, for the user.
 	addrs, routeList []string
 }
@@ -74,7 +77,7 @@ func Plan(h *Host) (files []File, notes []string, err error) {
 func plan(h *Host) ([]File, *planner, error) {
 	p := &planner{
 		h: h, byIndex: map[int]*Link{}, members: map[int][]int{}, uppers: map[int][]int{},
-		routes: map[int][]Route{}, carried: map[int]bool{},
+		routes: map[int][]Route{}, carried: map[int]bool{}, linkDNS: map[int][]netip.Addr{},
 	}
 	for i := range h.Links {
 		l := &h.Links[i]
@@ -98,6 +101,7 @@ func plan(h *Host) ([]File, *planner, error) {
 	if err := p.sortRoutes(); err != nil {
 		return nil, nil, err
 	}
+	p.sortDNS()
 	if h.ExtraRules > 0 {
 		p.notef("%d policy routing rules are not carried", h.ExtraRules)
 	}
@@ -299,6 +303,9 @@ func (p *planner) render() ([]File, error) {
 			return nil, err
 		}
 		if nw == "" {
+			for _, a := range p.linkDNS[l.Index] {
+				p.notef("nameserver %s on %s is not carried, as its link is left to DHCP or SLAAC", a, l.Name)
+			}
 			p.notef("%s gets its addresses from DHCP or SLAAC only, which Kairos configures by default", l.Name)
 			continue
 		}
@@ -318,7 +325,7 @@ func (p *planner) render() ([]File, error) {
 			files = append(files, File{resolvedConf, r})
 		}
 	} else if len(p.h.DNS) > 0 || len(p.h.Search) > 0 {
-		p.notef("nameservers %v and search domains %v are not carried, as no interface is; DHCP brings its own", p.h.DNS, p.h.Search)
+		p.notef("nameservers %v and search domains %v are not carried, as no interface is; Kairos takes nameservers from DHCP or router advertisements, and no search domains", p.h.DNS, p.h.Search)
 	}
 	return files, nil
 }
@@ -424,6 +431,9 @@ func (p *planner) network(l *Link) (string, error) {
 		if p.carried[u] {
 			network = append(network, "VLAN="+p.byIndex[u].Name)
 		}
+	}
+	for _, a := range p.linkDNS[l.Index] {
+		network = append(network, "DNS="+a.String())
 	}
 	if dhcp {
 		extra = append(extra, sections([]string{"[DHCPv4]", "ClientIdentifier=mac"}))
@@ -560,9 +570,40 @@ func routeSection(r *Route) string {
 	return sections(lines)
 }
 
+// sortDNS moves each link-local nameserver to the link its zone names, by
+// the old system's interface name or index, neither of which needs to hold on
+// the installed system.
+func (p *planner) sortDNS() {
+	for _, a := range p.h.DNS {
+		if !linkLocal6(a) {
+			continue
+		}
+		idx := slices.IndexFunc(p.h.Links, func(l Link) bool { return l.Name == a.Zone() || strconv.Itoa(l.Index) == a.Zone() })
+		switch {
+		case a.Zone() == "":
+			p.notef("nameserver %s is link-local and names no interface, so it is not carried", a)
+		case idx < 0 || !p.carried[p.h.Links[idx].Index]:
+			p.notef("nameserver %s is not carried, as its interface is not", a)
+		default:
+			l, a := p.h.Links[idx].Index, a.WithZone("")
+			if !slices.Contains(p.linkDNS[l], a) {
+				p.linkDNS[l] = append(p.linkDNS[l], a)
+			}
+		}
+	}
+}
+
+// linkLocal6 tells an IPv6 link-local address. An IPv4 one is left alone:
+// clouds route theirs, such as AWS's resolver at 169.254.169.253, through
+// any interface.
+func linkLocal6(a netip.Addr) bool { return a.Is6() && a.IsLinkLocalUnicast() }
+
 func (p *planner) resolved() string {
 	var servers []string
 	for _, a := range p.h.DNS {
+		if linkLocal6(a) {
+			continue
+		}
 		if a.IsLoopback() {
 			p.notef("nameserver %s is local to this system and is not carried", a)
 			continue

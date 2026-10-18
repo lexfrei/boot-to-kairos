@@ -28,6 +28,7 @@ Some refusals come before reporting starts and are not reported: a bad flag, the
 Reporting never stops or holds up the install.
 
 - The endpoint's name is resolved and its CA certificates are loaded before anything is built. Reports then go to the addresses resolved then, through no proxy, and a redirect is not followed. A name that does not resolve costs a warning, and the plan says why nothing is reported.
+- An address in the URL is used as it is, and a link-local one keeps its zone, written `%25` in the URL: `http://[fe80::1%25eth0]:8080/`.
 - Reports queue and are sent one at a time, each once, with a 3 second timeout. An answer other than 2xx counts as a failure. The first failure is logged, and the run goes on.
 - A report that does not fit in the queue is dropped, which shows as a gap in `seq`. `writing` and `verifying` leave the last places in the queue to the other phases.
 - Before the reboot or the exit, the reports still queued get 5 seconds in all, and the log says how many were delivered.

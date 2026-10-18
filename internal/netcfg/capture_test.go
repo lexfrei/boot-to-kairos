@@ -4,6 +4,7 @@ package netcfg
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -36,6 +37,10 @@ for l in d1 d2 d3 bond0 bond0.10 br0; do ip link set "$l" up; done
 ip link set bond0.10 mtu 1400
 ip addr add 192.0.2.10/24 dev bond0.10
 ip addr add 2001:db8::10/64 dev bond0.10 nodad
+ip addr add fd00:db8::10/64 dev bond0.10 nodad
+ip addr add fec0:db8::10/64 dev bond0.10 nodad
+ip addr add fd01:db8::6/64 dev bond0.10 noprefixroute mngtmpaddr nodad
+ip -6 route add fd01:db8::/64 dev bond0.10 proto ra
 ip addr add 198.51.100.5/24 dev br0 valid_lft 300 preferred_lft 300
 ip route add 203.0.113.0/24 via 192.0.2.1 dev bond0.10 proto static metric 7
 ip route add default via 198.51.100.200 dev bond0.10 onlink
@@ -163,6 +168,9 @@ func TestCaptureInANetworkNamespace(t *testing.T) {
 		// The kernel labels every IPv4 address, by default with the link's name.
 		"192.0.2.10/24":   {Prefix: netip.MustParsePrefix("192.0.2.10/24"), Global: true, Label: "bond0.10"},
 		"2001:db8::10/64": {Prefix: netip.MustParsePrefix("2001:db8::10/64"), Global: true},
+		"fd00:db8::10/64": {Prefix: netip.MustParsePrefix("fd00:db8::10/64"), Global: true},
+		"fec0:db8::10/64": {Prefix: netip.MustParsePrefix("fec0:db8::10/64"), Global: true},
+		"fd01:db8::6/64":  {Prefix: netip.MustParsePrefix("fd01:db8::6/64"), Global: true, Dynamic: true, NoPrefixRoute: true, TempTemplate: true},
 	}
 	for _, a := range vlan.Addrs {
 		if w, ok := wantAddrs[a.Prefix.String()]; ok {
@@ -292,6 +300,15 @@ func TestReadDNS(t *testing.T) {
 		t.Errorf("last of search and domain wins, a local resolver is kept for Plan to drop: dns %v search %v", dns, search)
 	}
 
+	write(stub, "nameserver 2001:db8::53\nsearch .\n")
+	if _, search = readDNS(stub, upstream); len(search) != 0 {
+		t.Errorf("search %q, want none", search)
+	}
+	write(stub, "nameserver 2001:db8::53\nsearch example.test .\n")
+	if _, search = readDNS(stub, upstream); strings.Join(search, " ") != "example.test" {
+		t.Errorf("search %q, want example.test", search)
+	}
+
 	if dns, search = readDNS(filepath.Join(dir, "missing"), upstream); dns != nil || search != nil {
 		t.Errorf("no resolv.conf: dns %v search %v", dns, search)
 	}
@@ -327,5 +344,34 @@ func TestDriver(t *testing.T) {
 	}
 	if got := driver(sys, "bond0"); got != "" {
 		t.Errorf("a device without a driver: %q", got)
+	}
+}
+
+func addrMsg(addr string, flags uint32) []byte {
+	a := netip.MustParseAddr(addr).As16()
+	m := []byte{syscall.AF_INET6, 64, 0, syscall.RT_SCOPE_UNIVERSE}
+	m = binary.NativeEndian.AppendUint32(m, 2)
+	m = binary.NativeEndian.AppendUint16(m, 4+16)
+	m = binary.NativeEndian.AppendUint16(m, syscall.IFA_ADDRESS)
+	m = append(m, a[:]...)
+	m = binary.NativeEndian.AppendUint16(m, 8)
+	m = binary.NativeEndian.AppendUint16(m, ifaFlags)
+	return binary.NativeEndian.AppendUint32(m, flags)
+}
+
+func TestAddressFlags(t *testing.T) {
+	for name, tc := range map[string]struct {
+		flags             uint32
+		dynamic, template bool
+	}{
+		"permanent":       {ifaFPermanent, false, false},
+		"with a lifetime": {0, true, false},
+		// systemd-networkd's ManageTemporaryAddress= on an address set by hand.
+		"permanent, temporary template": {ifaFPermanent | 0x100, false, true},
+	} {
+		_, a, ok := parseAddr(addrMsg("2001:db8::10", tc.flags))
+		if !ok || a.Dynamic != tc.dynamic || a.TempTemplate != tc.template {
+			t.Errorf("%s: %+v, want dynamic %v, template %v", name, a, tc.dynamic, tc.template)
+		}
 	}
 }

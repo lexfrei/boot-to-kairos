@@ -891,3 +891,61 @@ func TestNameserversWithNothingElseCarriedAreNoted(t *testing.T) {
 		t.Errorf("notes %q, err %v: dropped nameservers must be named", notes, err)
 	}
 }
+
+// A link-local nameserver is reachable through one link only, which the
+// zone names by the old system's interface name or index; neither need
+// match on the installed system, so it goes into that link's own file.
+func TestLinkLocalNameserver(t *testing.T) {
+	lan := nic(2, "lan0", "52:54:00:12:34:56", static("2001:db8::50/64"))
+	dyn := static("10.0.3.15/24")
+	dyn.Dynamic = true
+	dhcp := nic(3, "eth1", "52:54:00:12:34:57", dyn)
+	idle := nic(4, "eth2", "52:54:00:12:34:58")
+	for zone, ok := range map[string]bool{"lan0": true, "2": true, "eth1": false, "eth2": false, "9": false, "": false} {
+		t.Run(zone, func(t *testing.T) {
+			ns := netip.MustParseAddr("fe80::1")
+			if zone != "" {
+				ns = ns.WithZone(zone)
+			}
+			// The same nameserver named by the link's index.
+			same := ns
+			if zone == "lan0" {
+				same = ns.WithZone("2")
+			}
+			fs, notes, err := Plan(&Host{Links: []Link{lan, dhcp, idle}, DNS: []netip.Addr{ns, same, netip.MustParseAddr("169.254.169.253"), netip.MustParseAddr("2001:db8::53")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, f := range fs {
+				got[f.Path] = f.Content
+			}
+			want(t, got, "/etc/systemd/resolved.conf.d/10-btk.conf", "[Resolve]\nDNS=169.254.169.253 2001:db8::53\n")
+			nw := got["/etc/systemd/network/10-btk-525400123456.network"]
+			if carried := strings.Contains(nw, "[Network]\nDNS=fe80::1\n"); carried != ok {
+				t.Errorf("zone %q: carried in lan0's file %v, want %v:\n%s", zone, carried, ok, nw)
+			}
+			if noted := strings.Contains(strings.Join(notes, "\n"), "fe80::1"); noted == ok {
+				t.Errorf("zone %q: noted %v, want %v: %q", zone, noted, !ok, notes)
+			}
+			if strings.Count(nw, "DNS=") > 1 {
+				t.Errorf("zone %q: the nameserver is set twice:\n%s", zone, nw)
+			}
+			if zone == "" && !strings.Contains(strings.Join(notes, "\n"), "names no interface") {
+				t.Errorf("notes %q do not say the nameserver names no interface", notes)
+			}
+		})
+	}
+}
+
+// On an IPv6-only host the nameservers come from router advertisements,
+// so the note must not credit DHCP alone, nor promise search domains.
+func TestNameserversLeftToAutoconfigurationNameBothSources(t *testing.T) {
+	slaac := static("2001:db8::15/64")
+	slaac.Dynamic = true
+	_, notes, err := Plan(&Host{Links: []Link{nic(2, "eth0", "52:54:00:12:34:56", slaac)}, DNS: []netip.Addr{netip.MustParseAddr("2001:db8::53")}, Search: []string{"example.test"}})
+	// Kairos's default network files leave UseDomains= at no.
+	if n := strings.Join(notes, "\n"); err != nil || !strings.Contains(n, "nameservers from DHCP or router advertisements, and no search domains") {
+		t.Errorf("notes %q, err %v", notes, err)
+	}
+}

@@ -256,6 +256,11 @@ func Open(ctx context.Context, rawURL, caFile, disk string) (*Reporter, error) {
 }
 
 func resolve(ctx context.Context, host string) ([]netip.Addr, error) {
+	// The resolver drops the zone of a link-local address, without which
+	// it cannot be dialled.
+	if a, err := netip.ParseAddr(host); err == nil {
+		return []netip.Addr{a}, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
 	addrs, err := lookup(ctx, "ip", host)

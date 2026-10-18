@@ -70,6 +70,7 @@ func capture(root string) (*Host, error) {
 		}
 	}
 	markLeases(root, h, time.Now())
+	markAdvertised(h)
 	h.DNS, h.Search = readDNS(filepath.Join(root, "etc/resolv.conf"), filepath.Join(root, "run/systemd/resolve/resolv.conf"))
 	return h, nil
 }
@@ -88,6 +89,7 @@ const (
 
 	ifaFlags          = 8
 	ifaFPermanent     = 0x80
+	ifaFMngTmpAddr    = 0x100
 	ifaFNoPrefixRoute = 0x200
 
 	rtaMetrics   = 8
@@ -223,7 +225,9 @@ func parseAddr(m []byte) (int, Addr, bool) {
 	bits, flags, scope := int(m[1]), uint32(m[2]), m[3]
 	idx := int(binary.NativeEndian.Uint32(m[4:]))
 	var address, local netip.Addr
-	a := Addr{Global: scope == syscall.RT_SCOPE_UNIVERSE}
+	// RFC 3879 deprecated site-local addresses, but one set by hand is
+	// still the host's own; the kernel gives it site scope.
+	a := Addr{Global: scope == syscall.RT_SCOPE_UNIVERSE || scope == syscall.RT_SCOPE_SITE}
 	for _, at := range attrs(m[syscall.SizeofIfAddrmsg:]) {
 		switch at.typ {
 		case syscall.IFA_ADDRESS:
@@ -248,6 +252,7 @@ func parseAddr(m []byte) (int, Addr, bool) {
 	}
 	a.Dynamic = flags&ifaFPermanent == 0
 	a.NoPrefixRoute = flags&ifaFNoPrefixRoute != 0
+	a.TempTemplate = flags&ifaFMngTmpAddr != 0
 	return idx, a, true
 }
 
@@ -387,8 +392,9 @@ func parseResolvConf(path string) ([]netip.Addr, []string) {
 				dns = append(dns, a)
 			}
 		case "search", "domain":
-			// The last of the two wins, as for the resolver.
-			search = fields[1:]
+			// The last of the two wins, as for the resolver. systemd-resolved
+			// writes "search ." for none; resolved.conf reads it as a route.
+			search = slices.DeleteFunc(fields[1:], func(d string) bool { return d == "." })
 		}
 	}
 	return dns, search

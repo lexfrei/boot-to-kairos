@@ -23,7 +23,7 @@ Other limits:
 
 - [Legacy BIOS sector sizes, 4096-byte sectors on UEFI, and the gaps of the Secure Boot check](uefi-and-bios.md)
 - [Refused work dirs](workdir.md#refused-work-dirs)
-- [Refused network setups](network.md#refusals)
+- [Refused network setups](network.md#refusals), and [addresses that are carried, or not, by how they were set](network.md#what-is-carried)
 - [Install-time stages and refused cloud-configs](cloud-config.md)
 - [Image formats](image-and-signature.md#sources)
 - [Users and keys that are not carried](identity.md)

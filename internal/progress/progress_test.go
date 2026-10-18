@@ -72,7 +72,10 @@ func (l *logs) String() string {
 	return strings.Join(l.lines, "\n")
 }
 
-var errNoSuchHost = errors.New("no such host")
+var (
+	errNoSuchHost = errors.New("no such host")
+	errRefused    = errors.New("connection refused")
+)
 
 // pinLookup makes every name resolve to 127.0.0.1 and counts the lookups.
 func pinLookup(t *testing.T) *int {
@@ -389,6 +392,31 @@ func TestNameIsResolvedOnceAndDialledByAddress(t *testing.T) {
 	}
 	if s := r.String(); s != "POST "+u+" (127.0.0.1)" {
 		t.Fatalf("String = %q", s)
+	}
+}
+
+// A link-local receiver is reachable only through the interface its zone
+// names; a report dialled without the zone fails with EINVAL.
+func TestAZonedAddressIsDialledWithItsZone(t *testing.T) {
+	lookups := pinLookup(t)
+	r, _ := open(t, "http://[fe80::1%25eth9]:8080/hook", "")
+	got := make(chan string, 4)
+	r.dial = func(_ context.Context, _, addr string) (net.Conn, error) {
+		got <- addr
+		return nil, errRefused
+	}
+	r.Send(Event{Phase: Started})
+	r.Close(5 * time.Second)
+	if *lookups != 0 {
+		t.Errorf("%d lookups of an address", *lookups)
+	}
+	select {
+	case a := <-got:
+		if a != "[fe80::1%eth9]:8080" {
+			t.Fatalf("dialled %s, want the zone kept", a)
+		}
+	default:
+		t.Fatal("nothing was dialled")
 	}
 }
 
