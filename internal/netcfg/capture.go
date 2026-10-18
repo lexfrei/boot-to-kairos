@@ -392,8 +392,9 @@ func parseResolvConf(path string) ([]netip.Addr, []string) {
 				dns = append(dns, a)
 			}
 		case "search", "domain":
-			// The last of the two wins, as for the resolver.
-			search = fields[1:]
+			// The last of the two wins, as for the resolver. systemd-resolved
+			// writes "search ." for none; resolved.conf reads it as a route.
+			search = slices.DeleteFunc(fields[1:], func(d string) bool { return d == "." })
 		}
 	}
 	return dns, search

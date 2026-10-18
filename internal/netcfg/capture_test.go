@@ -300,6 +300,15 @@ func TestReadDNS(t *testing.T) {
 		t.Errorf("last of search and domain wins, a local resolver is kept for Plan to drop: dns %v search %v", dns, search)
 	}
 
+	write(stub, "nameserver 2001:db8::53\nsearch .\n")
+	if _, search = readDNS(stub, upstream); len(search) != 0 {
+		t.Errorf("search %q, want none", search)
+	}
+	write(stub, "nameserver 2001:db8::53\nsearch example.test .\n")
+	if _, search = readDNS(stub, upstream); strings.Join(search, " ") != "example.test" {
+		t.Errorf("search %q, want example.test", search)
+	}
+
 	if dns, search = readDNS(filepath.Join(dir, "missing"), upstream); dns != nil || search != nil {
 		t.Errorf("no resolv.conf: dns %v search %v", dns, search)
 	}
