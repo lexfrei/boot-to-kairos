@@ -18,6 +18,7 @@ import (
 
 	"github.com/lexfrei/boot-to-kairos/internal/install"
 	"github.com/lexfrei/boot-to-kairos/internal/mountns"
+	"github.com/lexfrei/boot-to-kairos/internal/signature"
 )
 
 // version is stamped at release build time with -ldflags "-X main.version=...".
@@ -27,6 +28,10 @@ func main() {
 	var o install.Options
 	flag.StringVar(&o.Image, "image", "", "Kairos OCI image: a registry reference such as quay.io/kairos/hadron:v0.5.1-core-amd64-generic-v4.3.0, oci:DIR for an OCI image layout or oci-archive:FILE for one in a tar archive")
 	flag.BoolVar(&o.InsecureRegistry, "insecure-registry", false, "allow plain http to a registry that is not at a loopback address; otherwise it is reached over https only")
+	verify := flag.Bool("verify-signature", true, "refuse an image whose cosign signature does not verify; by default the signer must be Kairos's release pipeline")
+	identity := flag.String("signature-identity", "", "regular expression the signing certificate's identity must match, to accept a signer other than Kairos; needs --signature-issuer")
+	issuer := flag.String("signature-issuer", "", "OIDC issuer the signing certificate must name; needs --signature-identity")
+	trustedRoot := flag.String("trusted-root", "", "Sigstore trusted_root.json to verify against, for a machine that cannot reach Sigstore's TUF repository")
 	flag.StringVar(&o.Disk, "disk", "", "whole disk to replace, for example /dev/sda (all data is erased)")
 	flag.StringVar(&o.ConfigPath, "cloud-config", "", "cloud-config for the installed system; optional while --keep-identity carries an admin login over")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask for confirmation")
@@ -37,6 +42,10 @@ func main() {
 	flag.StringVar(&o.WorkDir, "workdir", "", "existing directory on another disk to build the disk image in instead of RAM; only the unpacked image stays in a tmpfs")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	o.SkipSignature = !*verify
+	if *identity != "" || *issuer != "" || *trustedRoot != "" {
+		o.Signature = &install.SignatureOptions{Signer: signature.Policy{Identity: *identity, Issuer: *issuer}, TrustedRoot: *trustedRoot}
+	}
 
 	if *showVersion {
 		fmt.Fprintln(os.Stdout, "boot-to-kairos", version)

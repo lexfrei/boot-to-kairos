@@ -396,6 +396,10 @@ func (*fakeSource) close() error { return nil }
 
 func (*fakeSource) transport() string { return "fake" }
 
+func (*fakeSource) signatures(context.Context, []v1.Hash) (SignatureSource, error) {
+	return SignatureSource{}, errors.ErrUnsupported
+}
+
 type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, unix.ENOSPC }

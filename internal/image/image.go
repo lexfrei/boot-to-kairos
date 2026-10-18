@@ -27,7 +27,12 @@ type Image struct {
 	// Layers are the manifest's layer descriptors, oldest first.
 	Layers []v1.Descriptor
 
-	src source
+	// signed are the digests a signature for the image may name: the one a
+	// registry returned for the reference, which may be an index above
+	// Digest, or each entry of a layout's index.json that resolves to
+	// Digest.
+	signed []v1.Hash
+	src    source
 }
 
 // Extract applies the image's layers to dest, oldest first, the way a
