@@ -52,7 +52,7 @@ Some errors happen before the installer starts and print no object: flags it can
 | `no-login` | no way to log in to the installed system ([Identity](identity.md#users)) |
 | `account-clash` | a carried user whose name the image uses ([Identity](identity.md#users)) |
 | `interrupted` | a run stopped by SIGINT, SIGTERM or SIGHUP |
-| `bad-image` | an [image](image-and-signature.md#checks) with none for this architecture, a digest mismatch, more than one candidate in a layout, a legacy `docker save` archive or a redirect to plain http; or an [EFI system partition UEFI cannot read](uefi-and-bios.md#4096-byte-sectors-on-uefi) |
+| `bad-image` | an [image](image-and-signature.md#checks) with none for this architecture, a digest mismatch, a descriptor naming a sha512 digest, more than one candidate in a layout, a legacy `docker save` archive or a redirect to plain http; or an [EFI system partition UEFI cannot read](uefi-and-bios.md#4096-byte-sectors-on-uefi) |
 | `no-signature` | an [image without a signature](image-and-signature.md#signature) |
 | `bad-signature` | a signature that does not verify or is not by the expected signer |
 | `error` | anything else |

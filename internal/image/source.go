@@ -43,6 +43,10 @@ var (
 	// than a loopback one.
 	ErrInsecureRegistry = errors.New("plain http to a registry on another machine is refused")
 
+	// ErrUnsupportedDigest is a descriptor whose digest is not sha256, the
+	// only algorithm the fetch verifies.
+	ErrUnsupportedDigest = errors.New("only sha256 digests are supported")
+
 	errLocal   = errors.New("local write")
 	errStalled = errors.New("no data received")
 )
@@ -282,10 +286,23 @@ func checkConfig(ctx context.Context, src source, d *v1.Descriptor, want *v1.Pla
 	return nil
 }
 
+// requireSHA256 refuses a descriptor fetchVerified cannot check. ggcr
+// parses sha512 digests too, so the refusal is ours, and it comes before
+// the retries a failing fetch would get.
+func requireSHA256(d *v1.Descriptor) error {
+	if d.Digest.Algorithm != "sha256" {
+		return errors.Wrap(ErrUnsupportedDigest, d.Digest.String())
+	}
+	return nil
+}
+
 // fetchSmall reads and verifies a manifest or a config.
 func fetchSmall(ctx context.Context, src source, d *v1.Descriptor) ([]byte, error) {
 	if d.Size > maxManifest {
 		return nil, errors.Newf("%s names %d bytes, more than the %d a manifest or config may have", d.Digest, d.Size, maxManifest)
+	}
+	if err := requireSHA256(d); err != nil {
+		return nil, err
 	}
 	var buf bytes.Buffer
 	err := retry(ctx, src, d.Digest.String(), func() error {
@@ -298,6 +315,9 @@ func fetchSmall(ctx context.Context, src source, d *v1.Descriptor) ([]byte, erro
 // stageBlob copies a layer to a new file in dir and verifies it. The file
 // is removed again unless it is returned.
 func stageBlob(ctx context.Context, src source, d *v1.Descriptor, dir string) (string, error) {
+	if err := requireSHA256(d); err != nil {
+		return "", err
+	}
 	f, err := os.CreateTemp(dir, "blob-")
 	if err != nil {
 		return "", errors.Wrap(err, "create staging file")

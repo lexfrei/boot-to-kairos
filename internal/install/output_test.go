@@ -124,6 +124,7 @@ func TestARefusalIsReportedWithItsClass(t *testing.T) {
 		{cerrors.Wrap(image.ErrMismatch, "layer 0"), "bad-image"},
 		{cerrors.Wrap(image.ErrAmbiguous, "resolve"), "bad-image"},
 		{cerrors.Wrap(image.ErrLegacyDockerArchive, "resolve"), "bad-image"},
+		{cerrors.Wrap(image.ErrUnsupportedDigest, "resolve"), "bad-image"},
 		{cerrors.Wrap(image.ErrInsecureRegistry, "10.0.0.5:5000"), "bad-image"},
 		{cerrors.Wrap(context.Canceled, "pull"), "interrupted"},
 		{cerrors.Wrap(unix.EIO, "pull"), "error"},
