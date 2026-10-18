@@ -4,6 +4,7 @@ package netcfg
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net/netip"
@@ -38,6 +39,8 @@ ip addr add 192.0.2.10/24 dev bond0.10
 ip addr add 2001:db8::10/64 dev bond0.10 nodad
 ip addr add fd00:db8::10/64 dev bond0.10 nodad
 ip addr add fec0:db8::10/64 dev bond0.10 nodad
+ip addr add fd01:db8::6/64 dev bond0.10 noprefixroute mngtmpaddr nodad
+ip -6 route add fd01:db8::/64 dev bond0.10 proto ra
 ip addr add 198.51.100.5/24 dev br0 valid_lft 300 preferred_lft 300
 ip route add 203.0.113.0/24 via 192.0.2.1 dev bond0.10 proto static metric 7
 ip route add default via 198.51.100.200 dev bond0.10 onlink
@@ -167,6 +170,7 @@ func TestCaptureInANetworkNamespace(t *testing.T) {
 		"2001:db8::10/64": {Prefix: netip.MustParsePrefix("2001:db8::10/64"), Global: true},
 		"fd00:db8::10/64": {Prefix: netip.MustParsePrefix("fd00:db8::10/64"), Global: true},
 		"fec0:db8::10/64": {Prefix: netip.MustParsePrefix("fec0:db8::10/64"), Global: true},
+		"fd01:db8::6/64":  {Prefix: netip.MustParsePrefix("fd01:db8::6/64"), Global: true, Dynamic: true, NoPrefixRoute: true, TempTemplate: true},
 	}
 	for _, a := range vlan.Addrs {
 		if w, ok := wantAddrs[a.Prefix.String()]; ok {
@@ -331,5 +335,34 @@ func TestDriver(t *testing.T) {
 	}
 	if got := driver(sys, "bond0"); got != "" {
 		t.Errorf("a device without a driver: %q", got)
+	}
+}
+
+func addrMsg(addr string, flags uint32) []byte {
+	a := netip.MustParseAddr(addr).As16()
+	m := []byte{syscall.AF_INET6, 64, 0, syscall.RT_SCOPE_UNIVERSE}
+	m = binary.NativeEndian.AppendUint32(m, 2)
+	m = binary.NativeEndian.AppendUint16(m, 4+16)
+	m = binary.NativeEndian.AppendUint16(m, syscall.IFA_ADDRESS)
+	m = append(m, a[:]...)
+	m = binary.NativeEndian.AppendUint16(m, 8)
+	m = binary.NativeEndian.AppendUint16(m, ifaFlags)
+	return binary.NativeEndian.AppendUint32(m, flags)
+}
+
+func TestAddressFlags(t *testing.T) {
+	for name, tc := range map[string]struct {
+		flags             uint32
+		dynamic, template bool
+	}{
+		"permanent":       {ifaFPermanent, false, false},
+		"with a lifetime": {0, true, false},
+		// systemd-networkd's ManageTemporaryAddress= on an address set by hand.
+		"permanent, temporary template": {ifaFPermanent | 0x100, false, true},
+	} {
+		_, a, ok := parseAddr(addrMsg("2001:db8::10", tc.flags))
+		if !ok || a.Dynamic != tc.dynamic || a.TempTemplate != tc.template {
+			t.Errorf("%s: %+v, want dynamic %v, template %v", name, a, tc.dynamic, tc.template)
+		}
 	}
 }

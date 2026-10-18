@@ -54,11 +54,15 @@ type Addr struct {
 	Prefix netip.Prefix
 	// Peer is the other end of a point-to-point address.
 	Peer netip.Prefix
-	// Dynamic addresses have a lifetime, which a DHCP client or SLAAC set.
+	// Dynamic addresses have a lifetime, are owned by a DHCP client, or
+	// came from a router advertisement.
 	Dynamic       bool
 	Global        bool
 	Label         string
 	NoPrefixRoute bool
+	// TempTemplate is IFA_F_MANAGETEMPADDR: temporary addresses (RFC 8981)
+	// are made from this one.
+	TempTemplate bool
 }
 
 // Route is a route from the kernel's routing tables.

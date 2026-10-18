@@ -70,6 +70,7 @@ func capture(root string) (*Host, error) {
 		}
 	}
 	markLeases(root, h, time.Now())
+	markAdvertised(h)
 	h.DNS, h.Search = readDNS(filepath.Join(root, "etc/resolv.conf"), filepath.Join(root, "run/systemd/resolve/resolv.conf"))
 	return h, nil
 }
@@ -88,6 +89,7 @@ const (
 
 	ifaFlags          = 8
 	ifaFPermanent     = 0x80
+	ifaFMngTmpAddr    = 0x100
 	ifaFNoPrefixRoute = 0x200
 
 	rtaMetrics   = 8
@@ -250,6 +252,7 @@ func parseAddr(m []byte) (int, Addr, bool) {
 	}
 	a.Dynamic = flags&ifaFPermanent == 0
 	a.NoPrefixRoute = flags&ifaFNoPrefixRoute != 0
+	a.TempTemplate = flags&ifaFMngTmpAddr != 0
 	return idx, a, true
 }
 

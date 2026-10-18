@@ -268,3 +268,41 @@ func TestLeaseGateways(t *testing.T) {
 		})
 	}
 }
+
+// systemd-networkd adds an address from a router advertisement as the
+// template of temporary addresses, without a prefix route of its own, and
+// the prefix route with protocol ra.
+func TestAdvertisedPrefix(t *testing.T) {
+	ra := func(dst string) Route {
+		r := route(dst, "", 2)
+		r.Proto = protoRA
+		return r
+	}
+	noPrefix := func(p string) Addr {
+		a := static(p)
+		a.NoPrefixRoute, a.TempTemplate = true, true
+		return a
+	}
+	kernel := route("2001:db8:1::/64", "", 2)
+	kernel.Proto = protoKernel
+	for name, tc := range map[string]struct {
+		addr    Addr
+		routes  []Route
+		dynamic bool
+	}{
+		"advertised":                            {noPrefix("2001:db8:1::10/64"), []Route{ra("2001:db8:1::/64")}, true},
+		"another prefix advertised":             {noPrefix("2001:db8:1::10/64"), []Route{ra("2001:db8:2::/64")}, false},
+		"advertised on another link":            {noPrefix("2001:db8:1::10/64"), []Route{{Dst: netip.MustParsePrefix("2001:db8:1::/64"), Link: 3, Proto: protoRA}}, false},
+		"with a prefix route of its own":        {static("2001:db8:1::10/64"), []Route{ra("2001:db8:1::/64")}, false},
+		"beside a route set up for the prefix":  {noPrefix("2001:db8:1::10/64"), []Route{ra("2001:db8:1::/64"), kernel}, false},
+		"not a template of temporary addresses": {Addr{Prefix: netip.MustParsePrefix("2001:db8:1::10/64"), Global: true, NoPrefixRoute: true}, []Route{ra("2001:db8:1::/64")}, false},
+		"IPv4":                                  {noPrefix("192.0.2.10/24"), []Route{ra("192.0.2.0/24")}, false},
+		"with a lifetime":                       {Addr{Prefix: netip.MustParsePrefix("2001:db8:1::10/64"), Global: true, Dynamic: true, NoPrefixRoute: true}, nil, true},
+	} {
+		h := &Host{Links: []Link{nic(2, "eth0", "52:54:00:12:34:56", tc.addr)}, Routes: tc.routes}
+		markAdvertised(h)
+		if got := h.Links[0].Addrs[0].Dynamic; got != tc.dynamic {
+			t.Errorf("%s: dynamic %v, want %v", name, got, tc.dynamic)
+		}
+	}
+}

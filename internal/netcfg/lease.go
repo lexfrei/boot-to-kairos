@@ -264,3 +264,30 @@ func runningClients(root string) (map[string]bool, bool) {
 	}
 	return out, running
 }
+
+// markAdvertised marks as dynamic the IPv6 addresses systemd-networkd took
+// from a router advertisement: with an infinite lifetime the kernel marks
+// such an address permanent, like one set by hand. networkd adds it as the
+// template of temporary addresses and without a prefix route, and the
+// prefix route with protocol ra. All three are needed: an address set by
+// hand may be a template (ManageTemporaryAddress=), and NetworkManager may
+// leave only the ra route for a prefix that also holds a manual address.
+func markAdvertised(h *Host) {
+	for i := range h.Links {
+		l := &h.Links[i]
+		for j := range l.Addrs {
+			a := &l.Addrs[j]
+			if a.Dynamic || !a.TempTemplate || !a.NoPrefixRoute || !a.Prefix.Addr().Is6() {
+				continue
+			}
+			ra, other := false, false
+			for k := range h.Routes {
+				if r := &h.Routes[k]; r.Link == l.Index && r.Dst == a.Prefix.Masked() {
+					ra = ra || r.Proto == protoRA
+					other = other || r.Proto != protoRA
+				}
+			}
+			a.Dynamic = ra && !other
+		}
+	}
+}
