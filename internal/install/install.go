@@ -1220,6 +1220,7 @@ var errorClasses = []struct {
 	{image.ErrAmbiguous, "bad-image"},
 	{image.ErrLegacyDockerArchive, "bad-image"},
 	{image.ErrInsecureRegistry, "bad-image"},
+	{image.ErrInvalidJSON, "bad-image"},
 }
 
 func errorClass(err error) string {
