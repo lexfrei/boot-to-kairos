@@ -30,6 +30,7 @@ Nameservers:
 
 - An IPv6 link-local nameserver goes into the file of the link its zone names, as `fe80::1%eth0` or `fe80::1%2`, without the zone, since the interface's name and index may differ in Kairos. One whose link is left to Kairos's default configuration, or whose zone names nothing carried, is not carried, and the installer names it.
 - The other nameservers and the search domains go into systemd-resolved's global configuration, except a nameserver on the loopback, which is local to the old system and is named instead. The `search .` that systemd-resolved writes when there is no search domain is not carried: resolved would read it as a route for every name.
+- When no interface is carried, neither are the nameservers and search domains, and the installer says so. Kairos then takes nameservers from DHCP or router advertisements, and no search domains.
 
 Interfaces:
 

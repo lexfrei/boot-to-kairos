@@ -937,3 +937,15 @@ func TestLinkLocalNameserver(t *testing.T) {
 		})
 	}
 }
+
+// On an IPv6-only host the nameservers come from router advertisements,
+// so the note must not credit DHCP alone, nor promise search domains.
+func TestNameserversLeftToAutoconfigurationNameBothSources(t *testing.T) {
+	slaac := static("2001:db8::15/64")
+	slaac.Dynamic = true
+	_, notes, err := Plan(&Host{Links: []Link{nic(2, "eth0", "52:54:00:12:34:56", slaac)}, DNS: []netip.Addr{netip.MustParseAddr("2001:db8::53")}, Search: []string{"example.test"}})
+	// Kairos's default network files leave UseDomains= at no.
+	if n := strings.Join(notes, "\n"); err != nil || !strings.Contains(n, "nameservers from DHCP or router advertisements, and no search domains") {
+		t.Errorf("notes %q, err %v", notes, err)
+	}
+}

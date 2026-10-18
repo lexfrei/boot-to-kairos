@@ -325,7 +325,7 @@ func (p *planner) render() ([]File, error) {
 			files = append(files, File{resolvedConf, r})
 		}
 	} else if len(p.h.DNS) > 0 || len(p.h.Search) > 0 {
-		p.notef("nameservers %v and search domains %v are not carried, as no interface is; DHCP brings its own", p.h.DNS, p.h.Search)
+		p.notef("nameservers %v and search domains %v are not carried, as no interface is; Kairos takes nameservers from DHCP or router advertisements, and no search domains", p.h.DNS, p.h.Search)
 	}
 	return files, nil
 }
