@@ -240,12 +240,17 @@ func runningClients(root string) (map[string]bool, bool) {
 		if err != nil || !slices.Contains(dhcpClients, strings.TrimSpace(string(comm))) {
 			continue
 		}
-		running = true
 		cmdline, err := os.ReadFile(filepath.Join(filepath.Dir(c), "cmdline"))
 		if err != nil {
+			running = true
 			continue
 		}
 		args := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+		// A DHCPv6 client sets no IPv4 address.
+		if slices.Contains(args[1:], "-6") || slices.Contains(args[1:], "--ipv6only") {
+			continue
+		}
+		running = true
 		for _, a := range args[1:] {
 			switch {
 			case strings.HasPrefix(a, "--interface="):

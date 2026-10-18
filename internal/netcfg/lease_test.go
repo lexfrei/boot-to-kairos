@@ -135,6 +135,12 @@ lease {
 			[]string{"10.0.2.15/24"},
 		},
 		"dhcpcd for all interfaces": {map[string]string{"proc/416/comm": "dhcpcd\n", "proc/416/cmdline": "dhcpcd\x00-q\x00"}, nil},
+		"dhclient for DHCPv6 only": {
+			map[string]string{"proc/418/comm": "dhclient\n", "proc/418/cmdline": "dhclient\x00-6\x00-lf\x00/var/lib/dhcp/dhclient6.eth0.leases\x00eth0\x00"},
+			nil,
+		},
+		"dhcpcd for DHCPv6 only":           {map[string]string{"proc/419/comm": "dhcpcd\n", "proc/419/cmdline": "dhcpcd\x00--ipv6only\x00eth0\x00"}, nil},
+		"dhcpcd for IPv6 only, short flag": {map[string]string{"proc/420/comm": "dhcpcd\n", "proc/420/cmdline": "dhcpcd\x00-6\x00eth1\x00"}, nil},
 	} {
 		// A lease file under /var/lib counts only while a DHCP client runs:
 		// one left from before a switch to a static address would take the
@@ -187,6 +193,30 @@ lease {
 				}
 			}
 		})
+	}
+}
+
+// A DHCPv6 client hands out no IPv4 address, so a DHCPv4 lease file left
+// beside it from before a switch to a static address does not count.
+func TestDHCPv6ClientLeavesIPv4LeaseFilesStale(t *testing.T) {
+	root := t.TempDir()
+	put(t, root, "proc/9/comm", "dhclient\n")
+	put(t, root, "proc/9/cmdline", "dhclient\x00-6\x00-q\x00")
+	put(t, root, "var/lib/dhcp/dhclient.leases", "lease {\n  interface \"eth0\";\n  fixed-address 10.0.2.15;\n}\n")
+	for a, dyn := range leased(t, root) {
+		if dyn {
+			t.Errorf("%s is taken for a lease with only a DHCPv6 client running", a)
+		}
+	}
+}
+
+// A client whose command line cannot be read may be a DHCPv4 client.
+func TestClientWithUnreadableCommandLineKeepsLeaseFiles(t *testing.T) {
+	root := t.TempDir()
+	put(t, root, "proc/9/comm", "dhclient\n")
+	put(t, root, "var/lib/dhcp/dhclient.leases", "lease {\n  interface \"eth1\";\n  fixed-address 10.0.3.15;\n}\n")
+	if !leased(t, root)["10.0.3.15/24"] {
+		t.Error("the lease is not taken")
 	}
 }
 
