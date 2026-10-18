@@ -30,7 +30,8 @@ import (
 
 var (
 	// ErrMismatch is a manifest, config or layer that differs from the
-	// digest or size its parent names.
+	// digest or size its parent names, or a signature referrer listed as an
+	// image manifest and served as an index.
 	ErrMismatch = errors.New("does not match its descriptor")
 	// ErrPlatform is an image with nothing for the requested platform.
 	ErrPlatform = errors.New("no image for this platform")
@@ -296,7 +297,7 @@ func requireSHA256(d *v1.Descriptor) error {
 	return nil
 }
 
-// fetchSmall reads and verifies a manifest or a config.
+// fetchSmall reads and verifies a manifest, a config or another JSON blob.
 func fetchSmall(ctx context.Context, src source, d *v1.Descriptor) ([]byte, error) {
 	if d.Size > maxManifest {
 		return nil, errors.Newf("%s names %d bytes, more than the %d a manifest or config may have", d.Digest, d.Size, maxManifest)
@@ -309,6 +310,9 @@ func fetchSmall(ctx context.Context, src source, d *v1.Descriptor) ([]byte, erro
 		buf.Reset()
 		return fetchVerified(ctx, src, d, &buf)
 	})
+	if err == nil {
+		err = StrictJSON(buf.Bytes())
+	}
 	return buf.Bytes(), err
 }
 
@@ -483,6 +487,9 @@ func (r registrySource) root(ctx context.Context) ([]byte, types.MediaType, v1.H
 	if err != nil {
 		return nil, "", v1.Hash{}, false, errors.Wrapf(err, "pull %s", r.ref)
 	}
+	if err := StrictJSON(desc.Manifest); err != nil {
+		return nil, "", v1.Hash{}, false, errors.Wrapf(err, "%s", r.ref)
+	}
 	return desc.Manifest, desc.MediaType, desc.Digest, false, nil
 }
 
@@ -564,6 +571,9 @@ func (l layoutSource) root(context.Context) ([]byte, types.MediaType, v1.Hash, b
 	}
 	if len(raw) > maxManifest {
 		return nil, "", v1.Hash{}, false, errors.Newf("index.json is larger than %d bytes", maxManifest)
+	}
+	if err := StrictJSON(raw); err != nil {
+		return nil, "", v1.Hash{}, false, errors.Wrap(err, "index.json")
 	}
 	return raw, types.OCIImageIndex, v1.Hash{}, true, nil
 }

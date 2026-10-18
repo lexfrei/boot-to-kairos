@@ -1220,6 +1220,7 @@ var errorClasses = []struct {
 	{image.ErrAmbiguous, "bad-image"},
 	{image.ErrLegacyDockerArchive, "bad-image"},
 	{image.ErrInsecureRegistry, "bad-image"},
+	{image.ErrInvalidJSON, "bad-image"},
 }
 
 func errorClass(err error) string {
@@ -1272,7 +1273,7 @@ func checkSignature(ctx context.Context, o Options, img signed, plan *Plan) erro
 		}
 		res, err = signature.Verify(ctx, src, p, tm)
 		return err
-	}, signature.ErrNoSignature, signature.ErrBadSignature)
+	}, signature.ErrNoSignature, signature.ErrBadSignature, image.ErrInvalidJSON)
 	if errors.IsAny(err, signature.ErrNoSignature, signature.ErrBadSignature) {
 		return fmt.Errorf("%w; --verify-signature=false installs it anyway", err)
 	}

@@ -18,9 +18,11 @@ import (
 )
 
 // fakeSigned serves a layout's signatures: the v4.3.0 release index and
-// the bundle Kairos signed it with, under the digest bundleFor names.
+// the bundle Kairos signed it with, or bundle, under the digest bundleFor
+// names.
 type fakeSigned struct {
 	bundleFor string
+	bundle    []byte
 	calls     int
 	final     []error
 }
@@ -34,6 +36,9 @@ func (f *fakeSigned) Signatures(context.Context) (image.SignatureSource, error) 
 		b, err := os.ReadFile(filepath.Join("..", "signature", "testdata", "v4.3.0-bundle.json"))
 		if err != nil {
 			return src, err
+		}
+		if f.bundle != nil {
+			b = f.bundle
 		}
 		src.Bundles = map[v1.Hash][][]byte{mustHash(f.bundleFor): {b}}
 	}
@@ -84,6 +89,17 @@ func TestAnImageWithoutAcceptedSignatureIsRefused(t *testing.T) {
 		if !slices.Contains(f.final, signature.ErrNoSignature) || !slices.Contains(f.final, signature.ErrBadSignature) {
 			t.Fatalf("retried unless %v", f.final)
 		}
+	}
+}
+
+func TestAnAmbiguousBundleRefusesTheImageAtOnce(t *testing.T) {
+	f := &fakeSigned{bundleFor: signedIndex, bundle: []byte(`{"mediaType":"a","mediaType":"b"}`)}
+	err := checkSignature(context.Background(), Options{Signature: &SignatureOptions{TrustedRoot: testRoot}}, f, &Plan{})
+	if errorClass(err) != "bad-image" || strings.Contains(err.Error(), "--verify-signature=false") {
+		t.Fatalf("got %v, class %q, want bad-image without the hint to skip the check", err, errorClass(err))
+	}
+	if !slices.Contains(f.final, image.ErrInvalidJSON) {
+		t.Fatalf("retried unless %v", f.final)
 	}
 }
 
