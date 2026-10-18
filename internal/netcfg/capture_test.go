@@ -36,6 +36,8 @@ for l in d1 d2 d3 bond0 bond0.10 br0; do ip link set "$l" up; done
 ip link set bond0.10 mtu 1400
 ip addr add 192.0.2.10/24 dev bond0.10
 ip addr add 2001:db8::10/64 dev bond0.10 nodad
+ip addr add fd00:db8::10/64 dev bond0.10 nodad
+ip addr add fec0:db8::10/64 dev bond0.10 nodad
 ip addr add 198.51.100.5/24 dev br0 valid_lft 300 preferred_lft 300
 ip route add 203.0.113.0/24 via 192.0.2.1 dev bond0.10 proto static metric 7
 ip route add default via 198.51.100.200 dev bond0.10 onlink
@@ -163,6 +165,8 @@ func TestCaptureInANetworkNamespace(t *testing.T) {
 		// The kernel labels every IPv4 address, by default with the link's name.
 		"192.0.2.10/24":   {Prefix: netip.MustParsePrefix("192.0.2.10/24"), Global: true, Label: "bond0.10"},
 		"2001:db8::10/64": {Prefix: netip.MustParsePrefix("2001:db8::10/64"), Global: true},
+		"fd00:db8::10/64": {Prefix: netip.MustParsePrefix("fd00:db8::10/64"), Global: true},
+		"fec0:db8::10/64": {Prefix: netip.MustParsePrefix("fec0:db8::10/64"), Global: true},
 	}
 	for _, a := range vlan.Addrs {
 		if w, ok := wantAddrs[a.Prefix.String()]; ok {

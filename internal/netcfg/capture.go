@@ -223,7 +223,9 @@ func parseAddr(m []byte) (int, Addr, bool) {
 	bits, flags, scope := int(m[1]), uint32(m[2]), m[3]
 	idx := int(binary.NativeEndian.Uint32(m[4:]))
 	var address, local netip.Addr
-	a := Addr{Global: scope == syscall.RT_SCOPE_UNIVERSE}
+	// RFC 3879 deprecated site-local addresses, but one set by hand is
+	// still the host's own; the kernel gives it site scope.
+	a := Addr{Global: scope == syscall.RT_SCOPE_UNIVERSE || scope == syscall.RT_SCOPE_SITE}
 	for _, at := range attrs(m[syscall.SizeofIfAddrmsg:]) {
 		switch at.typ {
 		case syscall.IFA_ADDRESS:
