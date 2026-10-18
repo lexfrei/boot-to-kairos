@@ -18,12 +18,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/sigstore/cosign/v3/pkg/cosign"
 	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/lexfrei/boot-to-kairos/internal/image"
 )
@@ -142,6 +144,8 @@ func Verify(ctx context.Context, src image.SignatureSource, p Policy, tm root.Tr
 		switch {
 		case err == nil:
 			return res, nil
+		case errors.Is(err, image.ErrInvalidJSON):
+			return Result{}, err
 		case errors.Is(err, ErrBadSignature):
 			bad = errors.CombineErrors(bad, err)
 		case errors.Is(err, ErrNoSignature):
@@ -244,6 +248,13 @@ func registryBundles(ref name.Digest, opts []remote.Option) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	raw, err := idx.RawManifest()
+	if err != nil {
+		return nil, err
+	}
+	if err := image.StrictJSON(raw); err != nil {
+		return nil, errors.Wrap(err, "referrers")
+	}
 	im, err := idx.IndexManifest()
 	if err != nil {
 		return nil, err
@@ -254,11 +265,24 @@ func registryBundles(ref name.Digest, opts []remote.Option) ([][]byte, error) {
 		if !d.MediaType.IsImage() {
 			continue
 		}
-		img, err := remote.Image(ref.Context().Digest(d.Digest.String()), opts...)
+		desc, err := remote.Get(ref.Context().Digest(d.Digest.String()), opts...)
 		// A registry may list a referrer it has since deleted.
 		if te := (*transport.Error)(nil); errors.As(err, &te) && te.StatusCode == http.StatusNotFound {
 			continue
 		}
+		if err == nil {
+			err = image.StrictJSON(desc.Manifest)
+		}
+		// Image would resolve an index to a child of its own choosing. A
+		// mismatch is retried as the image's own are: a mirror may serve
+		// something else next time.
+		if err == nil && desc.MediaType.IsIndex() {
+			err = errors.Wrapf(image.ErrMismatch, "listed as an image manifest, served as %s", desc.MediaType)
+		}
+		if err != nil {
+			return nil, errors.Wrapf(err, "referrer %s", d.Digest)
+		}
+		img, err := desc.Image()
 		if err != nil {
 			return nil, errors.Wrapf(err, "referrer %s", d.Digest)
 		}
@@ -316,11 +340,21 @@ func verifyBundles(ctx context.Context, co *cosign.CheckOpts, d v1.Hash, raws []
 	var reasons []string
 	signatures := 0
 	for _, raw := range raws {
+		err := image.StrictJSON(raw)
+		if err == nil {
+			err = strictLogEntries(raw)
+		}
+		if err != nil {
+			return Result{}, errors.Wrapf(err, "bundle for %s", d)
+		}
 		b := new(sgbundle.Bundle)
 		if err := b.UnmarshalJSON(raw); err != nil {
 			signatures++
 			reasons = append(reasons, fmt.Sprintf("parse bundle: %v", err))
 			continue
+		}
+		if err := strictStatement(b); err != nil {
+			return Result{}, errors.Wrapf(err, "bundle for %s", d)
 		}
 		if claimsOther(b) {
 			reasons = append(reasons, "an attestation of something else")
@@ -347,6 +381,37 @@ func verifyBundles(ctx context.Context, co *cosign.CheckOpts, d v1.Hash, raws []
 		return Result{}, errNoBundle
 	}
 	return Result{}, errors.Wrapf(ErrBadSignature, "%s: %s", d, strings.Join(reasons, "; "))
+}
+
+// strictLogEntries checks the Rekor entry bodies in a bundle, base64 JSON
+// that sigstore-go already parses while it reads the bundle. A bundle that
+// protojson cannot read is left to sigstore-go.
+func strictLogEntries(raw []byte) error {
+	var pb protobundle.Bundle
+	if err := protojson.Unmarshal(raw, &pb); err != nil {
+		return nil //nolint:nilerr // refused by the bundle parser too
+	}
+	for _, e := range pb.GetVerificationMaterial().GetTlogEntries() {
+		if err := image.StrictJSON(e.GetCanonicalizedBody()); err != nil {
+			return errors.Wrap(err, "log entry")
+		}
+	}
+	return nil
+}
+
+// strictStatement checks the statement in a bundle's DSSE envelope, which
+// is JSON too. A bundle that carries none, or whose payload is not base64,
+// is left to the verification.
+func strictStatement(b *sgbundle.Bundle) error {
+	env, err := b.Envelope()
+	if err != nil {
+		return nil //nolint:nilerr // not a DSSE bundle
+	}
+	payload, err := env.DecodeB64Payload()
+	if err != nil {
+		return nil //nolint:nilerr // refused by the verification
+	}
+	return errors.Wrap(image.StrictJSON(payload), "statement")
 }
 
 // claimsOther says whether a bundle's statement, not yet verified, is one

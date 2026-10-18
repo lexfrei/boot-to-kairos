@@ -30,7 +30,8 @@ import (
 
 var (
 	// ErrMismatch is a manifest, config or layer that differs from the
-	// digest or size its parent names.
+	// digest or size its parent names, or a signature referrer listed as an
+	// image manifest and served as an index.
 	ErrMismatch = errors.New("does not match its descriptor")
 	// ErrPlatform is an image with nothing for the requested platform.
 	ErrPlatform = errors.New("no image for this platform")
