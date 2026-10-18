@@ -1,8 +1,17 @@
 # boot-to-kairos
 
+[![CI](https://github.com/lexfrei/boot-to-kairos/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/lexfrei/boot-to-kairos/actions/workflows/ci.yaml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/release/lexfrei/boot-to-kairos)](https://github.com/lexfrei/boot-to-kairos/releases/latest)
+[![Go](https://img.shields.io/github/go-mod/go-version/lexfrei/boot-to-kairos)](go.mod)
+[![License](https://img.shields.io/github/license/lexfrei/boot-to-kairos)](LICENSE)
+
 boot-to-kairos turns a running Linux machine into [Kairos](https://kairos.io) from userspace. You don't need a rescue system or a custom ISO. The idea comes from [boot-to-talos](https://github.com/cozystack/boot-to-talos).
 
 This is early work, tested on a few setups only (see [Tested](docs/tested.md)). It erases the target disk.
+
+## How it differs from existing tools
+
+Kairos's own install paths boot its live ISO, run from a rescue system with Docker or from MAAS's ephemeral environment, start a cloud instance from a Kairos image, or upgrade a Kairos that already runs. kairos-init builds the image, and AuroraBoot turns it into boot media or serves it for netboot. boot-to-kairos starts from the Linux the machine already runs, over SSH, and carries its network configuration, SSH users, host keys and hostname over. It checks the signature, the firmware and the Secure Boot trust before the disk is touched, and `--dry-run` stops right before that point. [boot-to-talos](https://github.com/cozystack/boot-to-talos) installs Talos from a running Linux too, carrying the default-route interface's address and gateway as kernel `ip=` arguments. For NixOS, [nixos-infect](https://github.com/elitak/nixos-infect) installs over the running system's root filesystem and [nixos-anywhere](https://github.com/nix-community/nixos-anywhere) kexecs into an installer over SSH. Sources and details: [Comparison](docs/comparison.md).
 
 ## How it works
 
@@ -99,6 +108,7 @@ On arm64 use `quay.io/kairos/hadron:v0.5.1-core-arm64-generic-v4.3.0`. Add `--dr
 - [Limitations](docs/limitations.md): disk and host layouts that are refused.
 - [Tested](docs/tested.md): configurations tested and their outcomes.
 - [CI and releases](docs/ci-and-releases.md): what CI checks and how releases are published.
+- [Comparison](docs/comparison.md): how Kairos's own installers, boot-to-talos, nixos-infect and nixos-anywhere differ, with sources.
 
 ## License
 
