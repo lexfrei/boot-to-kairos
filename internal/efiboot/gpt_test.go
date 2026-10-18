@@ -187,3 +187,17 @@ func TestOldDiskMBR(t *testing.T) {
 		t.Fatalf("blank disk read as %+v", d)
 	}
 }
+
+func TestESPNumber(t *testing.T) {
+	if n, err := ESPNumber("testdata/ubuntu-gpt.bin", 512); err != nil || n != 15 {
+		t.Errorf("ESP %d, %v; want partition 15", n, err)
+	}
+	linux := partition{num: 1, start: 34, size: 8, typ: guidOf(t, "af3dc60f838472478e793d69d8477de4")}
+	img := filepath.Join(t.TempDir(), "image.raw")
+	if err := os.WriteFile(img, makeGPT(t, 512, []partition{linux}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ESPNumber(img, 512); err == nil {
+		t.Error("an image without an ESP has no ESP number")
+	}
+}

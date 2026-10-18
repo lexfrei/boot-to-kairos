@@ -75,24 +75,35 @@ type store interface {
 // NewPlan encodes the entry for the EFI system partition of the image, whose
 // LBAs count in sectors of the given size, the disk's logical block size.
 func NewPlan(image string, sector int, arch string) (*Plan, error) {
-	loader, err := loaderPath(arch)
+	loader, err := LoaderPath(arch)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(image)
-	if err != nil {
-		return nil, errors.Wrap(err, "open image")
-	}
-	defer f.Close()
-	parts, err := readGPT(f, sector)
-	if err != nil {
-		return nil, errors.Wrap(err, "image partition table")
-	}
-	esp, err := findESP(parts)
+	esp, err := imageESP(image, sector)
 	if err != nil {
 		return nil, err
 	}
 	return &Plan{option: loadOption(Description, esp, loader)}, nil
+}
+
+// ESPNumber returns the partition number of the EFI system partition of the
+// image or block device at path.
+func ESPNumber(path string, sector int) (uint32, error) {
+	esp, err := imageESP(path, sector)
+	return esp.num, err
+}
+
+func imageESP(image string, sector int) (partition, error) {
+	f, err := os.Open(image)
+	if err != nil {
+		return partition{}, errors.Wrap(err, "open image")
+	}
+	defer f.Close()
+	parts, err := readGPT(f, sector)
+	if err != nil {
+		return partition{}, errors.Wrap(err, "image partition table")
+	}
+	return findESP(parts)
 }
 
 // Replacing records the partitions of disk, whose boot entries Apply removes.
@@ -283,9 +294,9 @@ func bootNumber(name string) int {
 	return n
 }
 
-// loaderPath is the removable-media path, the one kairos-agent installs the
+// LoaderPath is the removable-media path, the one kairos-agent installs the
 // shim to and the firmware falls back to.
-func loaderPath(arch string) (string, error) {
+func LoaderPath(arch string) (string, error) {
 	name, ok := map[string]string{"amd64": "X64", "arm64": "AA64", "riscv64": "RISCV64"}[arch]
 	if !ok {
 		return "", errors.Newf("no UEFI loader name for %s", arch)

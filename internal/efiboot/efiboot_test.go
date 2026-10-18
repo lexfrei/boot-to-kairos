@@ -51,11 +51,11 @@ func TestLoadOptionMatchesEfibootmgr(t *testing.T) {
 
 func TestLoaderPath(t *testing.T) {
 	for arch, want := range map[string]string{"amd64": `\EFI\BOOT\BOOTX64.EFI`, "arm64": `\EFI\BOOT\BOOTAA64.EFI`, "riscv64": `\EFI\BOOT\BOOTRISCV64.EFI`} {
-		if got, err := loaderPath(arch); err != nil || got != want {
+		if got, err := LoaderPath(arch); err != nil || got != want {
 			t.Errorf("%s: %q, %v; want %q", arch, got, err, want)
 		}
 	}
-	if _, err := loaderPath("mips"); err == nil {
+	if _, err := LoaderPath("mips"); err == nil {
 		t.Error("unknown arch accepted")
 	}
 }
