@@ -519,7 +519,7 @@ func write(raw, disk string) (flash.Stats, error) {
 	var err error
 	for attempt := 1; attempt <= writeAttempts; attempt++ {
 		var st flash.Stats
-		if st, err = writeImage(raw, disk, repairRounds); err == nil {
+		if st, err = writeImage(raw, disk, repairRounds, nil); err == nil {
 			return st, nil
 		}
 		// Only before the first attempt wrote anything is the disk intact.

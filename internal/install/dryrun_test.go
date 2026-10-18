@@ -74,7 +74,7 @@ func stubMachine(t *testing.T) *[]string {
 		calls = append(calls, "lock check")
 		return nil
 	}
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls = append(calls, "write")
 		return flash.Stats{}, nil
 	}

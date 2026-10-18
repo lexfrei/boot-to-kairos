@@ -24,7 +24,7 @@ func TestWriteRetriesTheWholeImage(t *testing.T) {
 	t.Cleanup(func() { writeImage = orig })
 
 	calls := 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		if calls < 3 {
 			return flash.Stats{}, flash.ErrUnrepaired
@@ -36,7 +36,7 @@ func TestWriteRetriesTheWholeImage(t *testing.T) {
 	}
 
 	calls = 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		return flash.Stats{}, flash.ErrUnrepaired
 	}
@@ -139,7 +139,7 @@ func TestWriteGivesUpAtOnceWhenNothingWasWritten(t *testing.T) {
 	orig := writeImage
 	t.Cleanup(func() { writeImage = orig })
 	calls := 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		return flash.Stats{}, errors.Join(flash.ErrNothingWritten, os.ErrPermission)
 	}
@@ -156,7 +156,7 @@ func TestWriteNeverCallsATouchedDiskIntact(t *testing.T) {
 	orig := writeImage
 	t.Cleanup(func() { writeImage = orig })
 	calls := 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		if calls == 1 {
 			return flash.Stats{}, flash.ErrUnrepaired // wrote, then failed to verify

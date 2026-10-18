@@ -26,6 +26,25 @@ type Extent struct {
 	Data bool
 }
 
+// Stage names a pass over the image that reports its progress.
+type Stage string
+
+const (
+	StageCopy   Stage = "copy"
+	StageVerify Stage = "verify"
+)
+
+// Progress is told how many of the image's total bytes a pass has done. It
+// runs on the writing goroutine, between chunks, so it must not block. Nil
+// is allowed.
+type Progress func(stage Stage, done, total int64)
+
+func (p Progress) report(stage Stage, done, total int64) {
+	if p != nil {
+		p(stage, done, total)
+	}
+}
+
 // Stats reports how many bytes were copied and zeroed, and how many repair
 // rounds the read-back needed.
 type Stats struct {
@@ -87,7 +106,7 @@ func Extents(f *os.File) ([]Extent, error) {
 
 // Copy writes the data extents of src to dst and zeroes its holes, so dst ends
 // up byte-identical to src over the length of src.
-func Copy(src, dst string) (Stats, error) {
+func Copy(src, dst string, progress Progress) (Stats, error) {
 	var st Stats
 	in, err := os.Open(src)
 	if err != nil {
@@ -117,6 +136,10 @@ func Copy(src, dst string) (Stats, error) {
 		}
 		return err
 	}
+	var total int64
+	if len(ext) > 0 {
+		total = ext[len(ext)-1].Off + ext[len(ext)-1].Len
+	}
 	buf := make([]byte, chunk)
 	for _, e := range ext {
 		if !e.Data {
@@ -124,6 +147,7 @@ func Copy(src, dst string) (Stats, error) {
 				return st, fail(err)
 			}
 			st.Zeroed += e.Len
+			progress.report(StageCopy, e.Off+e.Len, total)
 			continue
 		}
 		for done := int64(0); done < e.Len; {
@@ -136,6 +160,7 @@ func Copy(src, dst string) (Stats, error) {
 				return st, errors.Wrap(err, "write target")
 			}
 			done += n
+			progress.report(StageCopy, e.Off+done, total)
 		}
 		st.Copied += e.Len
 	}
@@ -144,7 +169,7 @@ func Copy(src, dst string) (Stats, error) {
 
 // Verify reads dst back, bypassing the page cache where the target allows it,
 // and returns the offsets of the pages that differ from src.
-func Verify(src, dst string) ([]int64, error) {
+func Verify(src, dst string, progress Progress) ([]int64, error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return nil, errors.Wrap(err, "open image")
@@ -184,6 +209,7 @@ func Verify(src, dst string) ([]int64, error) {
 				bad = append(bad, off+int64(p))
 			}
 		}
+		progress.report(StageVerify, off+int64(n), st.Size())
 	}
 	return bad, nil
 }
@@ -216,15 +242,15 @@ func Repair(src, dst string, pages []int64) error {
 
 // WriteVerified copies src over dst and then verifies and repairs until the
 // read-back matches, giving up after maxRounds repair rounds.
-func WriteVerified(src, dst string, maxRounds int) (Stats, error) {
-	st, err := Copy(src, dst)
+func WriteVerified(src, dst string, maxRounds int, progress Progress) (Stats, error) {
+	st, err := Copy(src, dst, progress)
 	if err != nil {
 		return st, err
 	}
 	afterCopy(dst)
 	for round := 0; ; round++ {
 		st.Repairs = round
-		bad, err := Verify(src, dst)
+		bad, err := Verify(src, dst, progress)
 		if err != nil {
 			return st, err
 		}
