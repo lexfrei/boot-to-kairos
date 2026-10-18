@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -87,7 +88,7 @@ func TestWriteVerifiedReplacesPreviousContent(t *testing.T) {
 	})
 	dst := dirtyTarget(t, size)
 
-	if _, err := WriteVerified(src, dst, 3); err != nil {
+	if _, err := WriteVerified(src, dst, 3, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,7 +103,7 @@ func TestVerifyFindsPagesChangedAfterWrite(t *testing.T) {
 	size := int64(32 * page)
 	src := sparseSource(t, size, map[int64][]byte{8 * page: bytes.Repeat([]byte{7}, page)})
 	dst := dirtyTarget(t, size)
-	if _, err := Copy(src, dst); err != nil {
+	if _, err := Copy(src, dst, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -116,7 +117,7 @@ func TestVerifyFindsPagesChangedAfterWrite(t *testing.T) {
 	}
 	f.Close()
 
-	bad, err := Verify(src, dst)
+	bad, err := Verify(src, dst, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +128,7 @@ func TestVerifyFindsPagesChangedAfterWrite(t *testing.T) {
 	if err := Repair(src, dst, bad); err != nil {
 		t.Fatal(err)
 	}
-	if bad, err = Verify(src, dst); err != nil || len(bad) != 0 {
+	if bad, err = Verify(src, dst, nil); err != nil || len(bad) != 0 {
 		t.Fatalf("after repair: bad=%v err=%v", bad, err)
 	}
 }
@@ -153,7 +154,7 @@ func TestWriteVerifiedRepairsLateWrite(t *testing.T) {
 	dst := dirtyTarget(t, size)
 	lateWrite(t, 5*page+3)
 
-	st, err := WriteVerified(src, dst, 2)
+	st, err := WriteVerified(src, dst, 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestWriteVerifiedFailsWhenRepairsAreNotAllowed(t *testing.T) {
 	dst := dirtyTarget(t, size)
 	lateWrite(t, 3*page)
 
-	if _, err := WriteVerified(src, dst, 0); !errors.Is(err, ErrUnrepaired) {
+	if _, err := WriteVerified(src, dst, 0, nil); !errors.Is(err, ErrUnrepaired) {
 		t.Fatalf("err = %v, want ErrUnrepaired", err)
 	}
 }
@@ -181,7 +182,7 @@ func TestWriteVerifiedFailsWhenRepairsAreNotAllowed(t *testing.T) {
 func TestWriteVerifiedRejectsTargetSmallerThanImage(t *testing.T) {
 	src := sparseSource(t, 16*page, nil)
 	dst := dirtyTarget(t, 8*page)
-	if _, err := WriteVerified(src, dst, 1); !errors.Is(err, ErrTargetTooSmall) {
+	if _, err := WriteVerified(src, dst, 1, nil); !errors.Is(err, ErrTargetTooSmall) {
 		t.Fatalf("err = %v, want ErrTargetTooSmall", err)
 	}
 }
@@ -190,10 +191,10 @@ func TestWriteVerifiedSaysWhenNothingWasWritten(t *testing.T) {
 	src := sparseSource(t, 16*page, nil)
 	// Failing before the first byte leaves the disk as it was: the caller
 	// can undo the freeze instead of declaring the disk lost.
-	if _, err := WriteVerified(src, filepath.Join(t.TempDir(), "missing"), 1); !errors.Is(err, ErrNothingWritten) {
+	if _, err := WriteVerified(src, filepath.Join(t.TempDir(), "missing"), 1, nil); !errors.Is(err, ErrNothingWritten) {
 		t.Fatalf("err = %v, want ErrNothingWritten for a target that cannot be opened", err)
 	}
-	if _, err := WriteVerified(src, dirtyTarget(t, 8*page), 1); !errors.Is(err, ErrNothingWritten) {
+	if _, err := WriteVerified(src, dirtyTarget(t, 8*page), 1, nil); !errors.Is(err, ErrNothingWritten) {
 		t.Fatalf("err = %v, want ErrNothingWritten for a target that is too small", err)
 	}
 	orig := afterCopy
@@ -210,7 +211,7 @@ func TestWriteVerifiedSaysWhenNothingWasWritten(t *testing.T) {
 			}
 		}
 	}
-	_, err := WriteVerified(src, dirtyTarget(t, 16*page), 0)
+	_, err := WriteVerified(src, dirtyTarget(t, 16*page), 0, nil)
 	if !errors.Is(err, ErrUnrepaired) || errors.Is(err, ErrNothingWritten) {
 		t.Fatalf("err = %v, want ErrUnrepaired alone once the disk was written", err)
 	}
@@ -232,10 +233,69 @@ func TestCopyMarksOnlyFailuresBeforeTheFirstTouch(t *testing.T) {
 				*touched = tc.touch
 				return os.ErrPermission
 			}
-			_, err := Copy(src, dirtyTarget(t, 16*page))
+			_, err := Copy(src, dirtyTarget(t, 16*page), nil)
 			if got := errors.Is(err, ErrNothingWritten); got != tc.want {
 				t.Fatalf("err = %v, ErrNothingWritten = %v, want %v", err, got, tc.want)
 			}
 		})
+	}
+}
+
+type progressCall struct {
+	stage       Stage
+	done, total int64
+}
+
+func TestWriteVerifiedReportsProgressOfEachPass(t *testing.T) {
+	// A data extent longer than a chunk, then a hole and data, and a hole
+	// at the end, so that each pass reports inside an extent too.
+	size := int64(chunk + 64*page)
+	src := sparseSource(t, size, map[int64][]byte{
+		0:               bytes.Repeat([]byte{1}, chunk+page),
+		chunk + 16*page: bytes.Repeat([]byte{2}, 3*page),
+	})
+	lateWrite(t, 20*page)
+	var calls []progressCall
+	if _, err := WriteVerified(src, dirtyTarget(t, size), 1, func(s Stage, done, total int64) {
+		calls = append(calls, progressCall{s, done, total})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The late write costs a repair round, so the read-back runs twice.
+	passes := map[Stage]int{}
+	var last progressCall
+	for i, c := range calls {
+		if c.total != size {
+			t.Fatalf("call %d = %+v, want total %d", i, c, size)
+		}
+		if c.done <= 0 || c.done > size {
+			t.Fatalf("call %d = %+v: done out of range", i, c)
+		}
+		if i > 0 && c.stage == last.stage && c.done <= last.done && last.done != size {
+			t.Fatalf("call %d = %+v after %+v: done went back within a pass", i, c, last)
+		}
+		if c.done == size {
+			passes[c.stage]++
+		}
+		last = c
+	}
+	if passes[StageCopy] != 1 || passes[StageVerify] != 2 {
+		t.Fatalf("finished passes = %v, want one copy and two read-backs: %+v", passes, calls)
+	}
+	if calls[0].stage != StageCopy || last.stage != StageVerify {
+		t.Fatalf("calls = %+v, want the copy first and a read-back last", calls)
+	}
+	for _, st := range []Stage{StageCopy, StageVerify} {
+		if !slices.Contains(calls, progressCall{st, chunk, size}) {
+			t.Fatalf("calls = %+v, want %s to report after its first chunk, inside the first extent", calls, st)
+		}
+	}
+}
+
+func TestWriteVerifiedTakesNoProgress(t *testing.T) {
+	size := int64(16 * page)
+	src := sparseSource(t, size, map[int64][]byte{0: bytes.Repeat([]byte{1}, page)})
+	if _, err := WriteVerified(src, dirtyTarget(t, size), 1, nil); err != nil {
+		t.Fatal(err)
 	}
 }

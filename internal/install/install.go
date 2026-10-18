@@ -31,6 +31,7 @@ import (
 	"github.com/lexfrei/boot-to-kairos/internal/loop"
 	"github.com/lexfrei/boot-to-kairos/internal/mountns"
 	"github.com/lexfrei/boot-to-kairos/internal/netcfg"
+	"github.com/lexfrei/boot-to-kairos/internal/progress"
 	"github.com/lexfrei/boot-to-kairos/internal/quiesce"
 	"github.com/lexfrei/boot-to-kairos/internal/sandbox"
 	"github.com/lexfrei/boot-to-kairos/internal/secureboot"
@@ -61,6 +62,8 @@ type Options struct {
 	// WorkDir, if set, holds the disk image and the staged layers instead
 	// of the tmpfs.
 	WorkDir string
+	// Report, if set, says where to post the install's progress.
+	Report *ReportOptions
 
 	work *dataDir
 	sb   *secureBoot
@@ -111,6 +114,11 @@ func Validate(o *Options, sysfs string, devOf func(string) (string, error)) ([]b
 	}
 	if err := checkSignatureFlags(o); err != nil {
 		return nil, err
+	}
+	if o.Report != nil {
+		if err := progress.Check(o.Report.URL, o.Report.CA); err != nil {
+			return nil, err
+		}
 	}
 	majmin, err := devOf(o.Disk)
 	if err != nil {
@@ -219,11 +227,13 @@ func dropWork(dir string, frozen bool) {
 	}
 }
 
-func run(ctx context.Context, o Options, plan *Plan, frozen *bool) error {
+func run(ctx context.Context, o Options, plan *Plan, frozen *bool) (err error) {
 	cfg, err := Validate(&o, "/sys", blockDevOf)
 	if err != nil {
 		return err
 	}
+	openReport(ctx, &o, plan)
+	defer func() { finishReport(&o, err, *frozen) }()
 	if err := quiesce.Preflight(o.Disk); err != nil {
 		return err
 	}
@@ -283,6 +293,8 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 	if err != nil {
 		return err
 	}
+	rep := o.reporter()
+	rep.Send(progress.Event{Phase: progress.Planned, Plan: plan.snapshot()})
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -297,6 +309,7 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		if err := lockCheck(); err != nil {
 			return err
 		}
+		rep.Send(progress.Event{Phase: progress.DryRun, Plan: plan.snapshot()})
 		if o.Output == OutputJSON {
 			return nil
 		}
@@ -319,7 +332,8 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		}
 		return errors.Wrap(err, "quiesce target disk; nothing was written, the changes made so far were undone")
 	}
-	st, err := write(raw, o.Disk)
+	rep.Send(progress.Event{Phase: progress.Quiesced})
+	st, err := write(raw, o.Disk, rep)
 	if errors.Is(err, flash.ErrNothingWritten) {
 		if uerr := thaw(); uerr != nil {
 			return errors.Wrap(err, "nothing was written, but a filesystem may still be frozen: reboot")
@@ -340,10 +354,13 @@ func proceed(ctx context.Context, o Options, cfg []byte, plan *Plan, in io.Reade
 		o.work.remove()
 	}
 	syncOthers(o.Disk, syncTimeout)
+	rep.Send(progress.Event{Phase: progress.Synced})
 	if entry != nil {
 		applyBootEntry(entry)
 	}
 	log.Print("rebooting")
+	rep.Send(progress.Event{Phase: progress.Rebooting})
+	rep.Close(reportBudget)
 	return errors.Wrap(reboot(), "reboot")
 }
 
@@ -495,12 +512,17 @@ var (
 	applyBootEntry = writeBootEntry
 	checkESP       = efiboot.CheckESP
 	sectorSize     = flash.SectorSize
+	openReporter   = progress.Open
 )
 
 const writeAttempts = 3
 
 // syncTimeout bounds the flush of the other filesystems before the reboot.
 const syncTimeout = 30 * time.Second
+
+// reportBudget bounds the wait for the last progress reports, before the
+// reboot or the exit.
+const reportBudget = 5 * time.Second
 
 func blockDevOf(path string) (string, error) {
 	var st unix.Stat_t
@@ -515,11 +537,13 @@ func blockDevOf(path string) (string, error) {
 
 // write repeats the whole verified write: a later attempt can succeed where
 // the repair rounds of an earlier one ran out.
-func write(raw, disk string) (flash.Stats, error) {
+func write(raw, disk string, rep *progress.Reporter) (flash.Stats, error) {
 	var err error
 	for attempt := 1; attempt <= writeAttempts; attempt++ {
 		var st flash.Stats
-		if st, err = writeImage(raw, disk, repairRounds); err == nil {
+		if st, err = writeImage(raw, disk, repairRounds, passes(rep, attempt)); err == nil {
+			written := st.Copied + st.Zeroed
+			rep.Send(progress.Event{Phase: progress.Verified, Bytes: &progress.Bytes{Done: written, Total: written, Attempt: attempt}, Repairs: &st.Repairs})
 			return st, nil
 		}
 		// Only before the first attempt wrote anything is the disk intact.
@@ -535,6 +559,17 @@ func write(raw, disk string) (flash.Stats, error) {
 	}
 	return flash.Stats{}, errors.Wrapf(err,
 		"%s is in an unknown state and will not boot; reinstall it from rescue media", disk)
+}
+
+// passes reports the passes of one write attempt.
+func passes(rep *progress.Reporter, attempt int) flash.Progress {
+	return func(stage flash.Stage, done, total int64) {
+		phase := progress.Writing
+		if stage == flash.StageVerify {
+			phase = progress.Verifying
+		}
+		rep.Progress(phase, attempt, done, total)
+	}
 }
 
 // safeLog is where logging goes once the disk is quiesced. A regular file
@@ -1002,6 +1037,10 @@ func (it planItem) MarshalJSON() ([]byte, error) {
 	}{it.name, it.value})
 }
 
+func (p *Plan) snapshot() []planItem {
+	return append([]planItem{}, p.items...)
+}
+
 // Add adds one item.
 func (p *Plan) Add(name, value string) {
 	p.items = append(p.items, planItem{name: name, value: value})
@@ -1131,7 +1170,7 @@ func report(out io.Writer, o Options, plan *Plan, err error, frozen bool) {
 		Passed  bool       `json:"passed"`
 		Plan    []planItem `json:"plan"`
 		Refusal *refusal   `json:"refusal"`
-	}{DryRun: o.DryRun, Passed: err == nil, Plan: append([]planItem{}, plan.items...)}
+	}{DryRun: o.DryRun, Passed: err == nil, Plan: plan.snapshot()}
 	if err != nil {
 		r.Refusal = &refusal{Class: errorClass(err), Message: err.Error()}
 	}
@@ -1155,6 +1194,7 @@ var errorClasses = []struct {
 	{ErrMissingConfig, "usage"},
 	{ErrBadOutput, "usage"},
 	{ErrSignatureFlags, "usage"},
+	{progress.ErrBadFlags, "usage"},
 	{ErrNotWholeDisk, "not-whole-disk"},
 	{ErrBadConfig, "bad-config"},
 	{kairos.ErrUncheckable, "bad-config"},
@@ -1256,4 +1296,53 @@ func checkSignatureFlags(o *Options) error {
 		return errors.Wrapf(ErrSignatureFlags, "--signature-identity: %v", err)
 	}
 	return nil
+}
+
+// ReportOptions are the progress report flags.
+type ReportOptions struct {
+	URL string
+	// CA, if set, is a PEM file of the CA certificates to trust instead of
+	// the system's.
+	CA string
+
+	sender *progress.Reporter
+}
+
+func (o *Options) reporter() *progress.Reporter {
+	if o.Report == nil {
+		return nil
+	}
+	return o.Report.sender
+}
+
+// openReport starts reporting to o.Report's endpoint, if any, and names
+// the endpoint in the plan. An endpoint it cannot use costs a warning: the
+// install never waits on it.
+func openReport(ctx context.Context, o *Options, plan *Plan) {
+	if o.Report == nil {
+		return
+	}
+	r, err := openReporter(ctx, o.Report.URL, o.Report.CA, o.Disk)
+	if err != nil {
+		log.Printf("warning: progress report: %v; the install goes on without it", err)
+		plan.Add("progress report", "none: "+err.Error())
+		return
+	}
+	o.Report.sender = r
+	plan.Add("progress report", r.String())
+	r.Send(progress.Event{Phase: progress.Started})
+}
+
+// finishReport reports why the run stopped, if it failed, and gives the
+// queued reports reportBudget to go out.
+func finishReport(o *Options, err error, frozen bool) {
+	r := o.reporter()
+	if err != nil {
+		phase := progress.Refused
+		if frozen {
+			phase = progress.Failed
+		}
+		r.Send(progress.Event{Phase: phase, Error: &progress.Failure{Class: errorClass(err), Message: err.Error()}})
+	}
+	r.Close(reportBudget)
 }

@@ -293,7 +293,7 @@ func TestInWorkDir(t *testing.T) {
 
 func TestTheDiskImageIsKeptWhenTheWriteFails(t *testing.T) {
 	stubMachine(t)
-	writeImage = func(string, string, int) (flash.Stats, error) { return flash.Stats{}, unix.EIO }
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) { return flash.Stats{}, unix.EIO }
 	w, err := openWorkDir(t.TempDir(), "/dev/vda", 1<<30, fitAnywhere)
 	if err != nil {
 		t.Fatal(err)
@@ -340,7 +340,7 @@ func TestStagingFull(t *testing.T) {
 
 func TestTheDiskImageGoesWhenNothingWasWritten(t *testing.T) {
 	stubMachine(t)
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		return flash.Stats{}, cerrors.Mark(unix.EIO, flash.ErrNothingWritten)
 	}
 	w, err := openWorkDir(t.TempDir(), "/dev/vda", 1<<30, fitAnywhere)

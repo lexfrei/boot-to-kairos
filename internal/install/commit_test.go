@@ -24,23 +24,23 @@ func TestWriteRetriesTheWholeImage(t *testing.T) {
 	t.Cleanup(func() { writeImage = orig })
 
 	calls := 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		if calls < 3 {
 			return flash.Stats{}, flash.ErrUnrepaired
 		}
 		return flash.Stats{Copied: 1}, nil
 	}
-	if st, err := write("/run/boot-to-kairos/image.raw", "/dev/vda"); err != nil || st.Copied != 1 || calls != 3 {
+	if st, err := write("/run/boot-to-kairos/image.raw", "/dev/vda", nil); err != nil || st.Copied != 1 || calls != 3 {
 		t.Fatalf("write = %+v, %v after %d calls, want success on the third", st, err, calls)
 	}
 
 	calls = 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		return flash.Stats{}, flash.ErrUnrepaired
 	}
-	_, err := write("/run/boot-to-kairos/image.raw", "/dev/vda")
+	_, err := write("/run/boot-to-kairos/image.raw", "/dev/vda", nil)
 	if !errors.Is(err, flash.ErrUnrepaired) || calls != writeAttempts {
 		t.Fatalf("err = %v after %d calls, want ErrUnrepaired after %d", err, calls, writeAttempts)
 	}
@@ -139,11 +139,11 @@ func TestWriteGivesUpAtOnceWhenNothingWasWritten(t *testing.T) {
 	orig := writeImage
 	t.Cleanup(func() { writeImage = orig })
 	calls := 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		return flash.Stats{}, errors.Join(flash.ErrNothingWritten, os.ErrPermission)
 	}
-	_, err := write("/run/boot-to-kairos/image.raw", "/dev/vda")
+	_, err := write("/run/boot-to-kairos/image.raw", "/dev/vda", nil)
 	if !errors.Is(err, flash.ErrNothingWritten) || calls != 1 {
 		t.Fatalf("err = %v after %d calls, want ErrNothingWritten after one: the disk is intact, there is nothing to retry over", err, calls)
 	}
@@ -156,14 +156,14 @@ func TestWriteNeverCallsATouchedDiskIntact(t *testing.T) {
 	orig := writeImage
 	t.Cleanup(func() { writeImage = orig })
 	calls := 0
-	writeImage = func(string, string, int) (flash.Stats, error) {
+	writeImage = func(string, string, int, flash.Progress) (flash.Stats, error) {
 		calls++
 		if calls == 1 {
 			return flash.Stats{}, flash.ErrUnrepaired // wrote, then failed to verify
 		}
 		return flash.Stats{}, errors.Join(flash.ErrNothingWritten, os.ErrPermission)
 	}
-	_, err := write("/run/boot-to-kairos/image.raw", "/dev/vda")
+	_, err := write("/run/boot-to-kairos/image.raw", "/dev/vda", nil)
 	if err == nil || errors.Is(err, flash.ErrNothingWritten) {
 		t.Fatalf("err = %v: the first attempt already wrote, so a later one writing nothing does not make the disk intact", err)
 	}

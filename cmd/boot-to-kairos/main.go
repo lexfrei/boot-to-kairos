@@ -39,12 +39,18 @@ func main() {
 	flag.BoolVar(&o.KeepIdentity, "keep-identity", true, "carry this system's SSH users and their keys, SSH host keys and hostname into the installed one, where the cloud-config does not set them")
 	flag.StringVar(&o.Output, "output", install.OutputText, "text, or json for one JSON object on stdout with the plan and the refusal, if any")
 	flag.BoolVar(&o.DryRun, "dry-run", false, "check and build everything, then stop before the point of no return and print the plan; the disk is left alone")
+	reportURL := flag.String("report-url", "", "http or https URL to POST the install's progress to, one JSON object per report until the reboot; an endpoint that does not answer costs a warning, never the install")
+	reportCA := flag.String("report-ca", "", "PEM file of the CA certificates to trust for an https --report-url, instead of the system's")
 	flag.StringVar(&o.WorkDir, "workdir", "", "existing directory on another disk to build the disk image in instead of RAM; only the unpacked image stays in a tmpfs")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	o.SkipSignature = !*verify
 	if *identity != "" || *issuer != "" || *trustedRoot != "" {
 		o.Signature = &install.SignatureOptions{Signer: signature.Policy{Identity: *identity, Issuer: *issuer}, TrustedRoot: *trustedRoot}
+	}
+
+	if *reportURL != "" || *reportCA != "" {
+		o.Report = &install.ReportOptions{URL: *reportURL, CA: *reportCA}
 	}
 
 	if *showVersion {
