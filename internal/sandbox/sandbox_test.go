@@ -5,6 +5,7 @@ package sandbox
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -317,8 +318,40 @@ func TestHideCmdlineCoversItReadOnly(t *testing.T) {
 		calls[1].target != calls[0].target || calls[1].flags&unix.MS_RDONLY == 0 || calls[1].flags&unix.MS_REMOUNT == 0 {
 		t.Fatalf("mounts %+v, want a bind over proc/cmdline remounted read-only", calls)
 	}
-	if b, err := os.ReadFile(calls[0].src); err != nil || len(b) != 0 || !strings.HasPrefix(calls[0].src, filepath.Join(root, "run")+"/") {
-		t.Fatalf("bound %s: %q, %v, want an empty file on the sandbox's private run", calls[0].src, b, err)
+	if b, err := os.ReadFile(calls[0].src); err != nil || string(b) != "\n" || !strings.HasPrefix(calls[0].src, filepath.Join(root, "run")+"/") {
+		t.Fatalf("bound %s: %q, %v, want a blank line on the sandbox's private run", calls[0].src, b, err)
+	}
+}
+
+// The image's steps test for the absence of a Kairos marker with grep -v,
+// which fails on a file with no lines at all: the hidden command line has to
+// read like a host's that carries no marker, not like no command line.
+func TestHiddenCmdlineReadsAsAHostWithoutMarkers(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"proc", "run"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "proc/cmdline"), []byte("rd.immucore.uki\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []mountCall
+	if err := hideCmdline(root, recordMounts(&calls, nil)); err != nil || len(calls) == 0 {
+		t.Fatalf("%v, mounts %+v", err, calls)
+	}
+	for args, want := range map[string]int{"-vq": 0, "-q": 1} {
+		err := exec.CommandContext(t.Context(), "grep", args, "rd.immucore.uki", calls[0].src).Run()
+		var exit *exec.ExitError
+		got := 0
+		if errors.As(err, &exit) {
+			got = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("grep %s rd.immucore.uki on the hidden cmdline exited %d, want %d", args, got, want)
+		}
 	}
 }
 
@@ -369,7 +402,7 @@ func TestSetupHidesTheHostCmdline(t *testing.T) {
 	if err := Setup(root, binds); err != nil {
 		t.Fatal(err)
 	}
-	if b, err := os.ReadFile(filepath.Join(root, "proc/cmdline")); err != nil || len(b) != 0 {
+	if b, err := os.ReadFile(filepath.Join(root, "proc/cmdline")); err != nil || string(b) != "\n" {
 		t.Fatalf("cmdline in the build: %q, %v", b, err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "proc/cmdline"), []byte("x"), 0o600); !errors.Is(err, unix.EROFS) {

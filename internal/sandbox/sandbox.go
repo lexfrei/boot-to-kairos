@@ -191,11 +191,13 @@ func hideEFIVars(root string, mount func(string, string, string, uintptr, string
 	return nil
 }
 
-// hideCmdline covers the bound /proc/cmdline with an empty read-only file.
+// hideCmdline covers the bound /proc/cmdline with a read-only blank line.
 // kairos-agent merges install keys from it over the cloud-config, each
 // token evaluated as a jq assignment, and runs the stages it names; on a
-// host that is not Kairos nothing on it is meant for the agent. The file
-// lives on the sandbox's private /run.
+// host that is not Kairos nothing on it is meant for the agent. The
+// covering file lives on the sandbox's private /run and is not left empty:
+// the image's steps test for an absent marker with grep -v, which fails on
+// a file with no lines, and are skipped.
 func hideCmdline(root string, mount func(string, string, string, uintptr, string) error) error {
 	target := filepath.Join(root, "proc/cmdline")
 	if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
@@ -203,11 +205,11 @@ func hideCmdline(root string, mount func(string, string, string, uintptr, string
 	} else if err != nil {
 		return errors.Wrap(err, "check the kernel command line")
 	}
-	empty := filepath.Join(root, "run/btk-cmdline")
-	if err := os.WriteFile(empty, nil, 0o444); err != nil {
+	blank := filepath.Join(root, "run/btk-cmdline")
+	if err := os.WriteFile(blank, []byte("\n"), 0o444); err != nil {
 		return errors.Wrap(err, "create the build's kernel command line")
 	}
-	if err := mount(empty, target, "", unix.MS_BIND, ""); err != nil {
+	if err := mount(blank, target, "", unix.MS_BIND, ""); err != nil {
 		return errors.Wrap(err, "hide the kernel command line from the build")
 	}
 	if err := mount("", target, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_RDONLY, ""); err != nil {
