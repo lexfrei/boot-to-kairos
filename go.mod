@@ -7,11 +7,11 @@ require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/in-toto/attestation v1.2.0
-	github.com/sigstore/cosign/v3 v3.1.3
+	github.com/sigstore/cosign/v3 v3.1.4
 	github.com/sigstore/protobuf-specs v0.5.2
-	github.com/sigstore/sigstore-go v1.3.0
+	github.com/sigstore/sigstore-go v1.4.0
 	github.com/theupdateframework/go-tuf/v2 v2.4.2
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -45,7 +45,7 @@ require (
 	github.com/go-openapi/runtime v0.33.3 // indirect
 	github.com/go-openapi/runtime/server-middleware v0.33.3 // indirect
 	github.com/go-openapi/spec v1.0.1 // indirect
-	github.com/go-openapi/strfmt v0.27.3 // indirect
+	github.com/go-openapi/strfmt v0.27.4 // indirect
 	github.com/go-openapi/swag/conv v0.29.2 // indirect
 	github.com/go-openapi/swag/fileutils v0.29.2 // indirect
 	github.com/go-openapi/swag/jsonutils v0.29.2 // indirect
@@ -59,11 +59,9 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
-	github.com/google/certificate-transparency-go v1.3.3 // indirect
+	github.com/google/certificate-transparency-go v1.4.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.32.0 // indirect
-	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
-	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
 	github.com/in-toto/in-toto-golang v0.11.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jedisct1/go-minisign v0.0.0-20260527172527-a09352b57a22 // indirect
@@ -81,10 +79,10 @@ require (
 	github.com/sassoftware/relic/v8 v8.2.0 // indirect
 	github.com/secure-systems-lab/go-securesystemslib v0.11.1 // indirect
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
-	github.com/sigstore/rekor v1.5.4 // indirect
-	github.com/sigstore/rekor-tiles/v2 v2.3.0 // indirect
+	github.com/sigstore/rekor v1.5.5 // indirect
+	github.com/sigstore/rekor-tiles/v2 v2.4.0 // indirect
 	github.com/sigstore/sigstore v1.11.1 // indirect
-	github.com/sigstore/timestamp-authority/v2 v2.1.4 // indirect
+	github.com/sigstore/timestamp-authority/v2 v2.2.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
