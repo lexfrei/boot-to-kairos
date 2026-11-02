@@ -17,7 +17,7 @@ defaults:
 
 jobs:
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,7 +31,7 @@ jobs:
           version: v2.15.0
 
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,7 +51,7 @@ jobs:
   # The root tests attach loop devices and create device-mapper devices,
   # which is only safe on a throwaway VM like a hosted runner.
   test-root:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,7 +75,7 @@ jobs:
 
   build:
     needs: [lint, test, test-root, e2e]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
     steps:
@@ -117,7 +117,7 @@ jobs:
   publish:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:
