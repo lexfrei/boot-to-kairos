@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/lexfrei/boot-to-kairos/internal/cloudconfig"
 )

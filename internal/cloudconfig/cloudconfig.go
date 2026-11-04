@@ -8,7 +8,7 @@ import (
 	"reflect"
 
 	"github.com/cockroachdb/errors"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Doc is a parsed cloud-config.
