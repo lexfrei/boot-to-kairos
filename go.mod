@@ -10,7 +10,7 @@ require (
 	github.com/sigstore/cosign/v3 v3.1.6
 	github.com/sigstore/protobuf-specs v0.5.3-0.20261124074135-7eccec11d5be
 	github.com/sigstore/sigstore-go v1.4.1
-	github.com/theupdateframework/go-tuf/v2 v2.5.0
+	github.com/theupdateframework/go-tuf/v2 v2.6.0
 	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/sys v0.50.0
 	google.golang.org/protobuf v1.36.12
